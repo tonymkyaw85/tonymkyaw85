@@ -723,7 +723,7 @@
   function printSlip() {
     const p = payslip(slipMonth), u = state.user;
     const w = window.open("", "_blank");
-    if (!w) return toast("Izinkan pop-up untuk mengunduh PDF");
+    if (!w) { actions.slipDetail(); return toast("Pop-up diblokir – menampilkan rincian"); }
     w.document.write(`<!doctype html><html><head><title>Slip Gaji ${monthLabel(slipMonth)} - ${esc(u.name)}</title>
       <style>body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;color:#16223b}h1{color:#1a6bf0;margin:0}table{width:100%;border-collapse:collapse;margin-top:12px}td{padding:8px 0;border-bottom:1px solid #e6ebf3}td:last-child{text-align:right}.t td{font-weight:800;border:0;font-size:18px}</style></head>
       <body><h1>MyWork</h1><p>Slip Gaji – <b>${monthLabel(slipMonth)}</b></p>
