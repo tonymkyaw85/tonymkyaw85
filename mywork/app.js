@@ -73,6 +73,7 @@
   const idr = (n) => "Rp " + Math.round(n).toLocaleString("en-US");
   const fileSize = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB");
   const daysBetween = (a, b) => Math.round((parseIso(b) - parseIso(a)) / 86400000) + 1;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
   const ago = (ts) => {
     const diff = Date.now() - ts, m = 60000, h = 60 * m, d = 24 * h;
     if (diff < h) return `${Math.max(1, Math.round(diff / m))} min ago`;
@@ -126,13 +127,27 @@
         { id: 4, name: "Vaccine Certificate", file: "vaksin_covid.pdf", size: 1003520, kind: "orange" },
         { id: 5, name: "Employment Letter", file: "paklaring.pdf", size: 1468006, kind: "purple" },
       ],
-      notifRead: false,
+      // Demo-only auth: SHA-256 of the password is kept in the browser. Default: "password123".
+      auth: { hash: DEFAULT_HASH, loggedIn: false },
+      notifications: [
+        { id: 1, ts: now - 3 * 3600000, title: "Leave approved", body: `Your Annual Leave for ${fmtRange(d(-3), d(-1))} was approved.`, icon: "check", color: "green", go: "#/status", read: false },
+        { id: 2, ts: now - 26 * 3600000, title: "New announcement", body: "National Holiday – the office is closed on 28 Sep 2026.", icon: "megaphone", color: "blue", go: "#/pengumuman", read: false },
+        { id: 3, ts: now - 7 * DAY, title: "Overtime rejected", body: `Your overtime request for ${fmtRange(d(-18), d(-18))} was rejected.`, icon: "x", color: "red", go: "#/status", read: true },
+      ],
       nextId: 100,
     };
   }
+  const DEFAULT_HASH = "ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f";
+
+  async function sha256(text) {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
 
   let state;
-  try { state = JSON.parse(localStorage.getItem(KEY)) || seed(); } catch { state = seed(); }
+  // Merge over fresh seed data so fields added in newer versions get defaults.
+  try { state = Object.assign(seed(), JSON.parse(localStorage.getItem(KEY)) || {}); } catch { state = seed(); }
+  delete state.notifRead;
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* storage unavailable */ } };
 
   // Roll attendance over to a new day, archiving yesterday's record.
@@ -278,16 +293,88 @@
   // ---------- Screens ----------
   const screens = {};
 
-  screens.onboarding = () => ({
+  const featureArt = (icon, color, chips) => `
+    <div class="feature-art"><span class="feature-core" style="color:${color}">${ic(icon, 72, "currentColor", 1.5)}</span>
+      ${chips.map((c, i) => `<span class="feature-chip c${i}">${ic(c[0], 16, c[1])}${c[2]}</span>`).join("")}</div>`;
+  const SLIDES = [
+    { art: () => onboardArt, title: "Empowered Employees<br/>A More Productive Company" },
+    { art: () => featureArt("userCheck", "var(--green)", [["login", "var(--green)", "Checked in 08:02"], ["clock", "var(--primary)", "8h 12m today"]]),
+      title: '<span class="slide-title">Attendance in One Tap</span>', text: "Check in and out from your phone and see your hours and history." },
+    { art: () => featureArt("send", "var(--primary)", [["check", "var(--green)", "Leave approved"], ["receipt", "var(--orange)", "Rp 150,000"]]),
+      title: '<span class="slide-title">Requests Without Paperwork</span>', text: "Submit leave, overtime and reimbursements, and track every approval." },
+  ];
+  let slide = 0;
+  screens.onboarding = () => {
+    const sl = SLIDES[slide], last = slide === SLIDES.length - 1;
+    return {
+      full: true, noTabs: true,
+      html: `
+      <div class="onboard" id="onboard">
+        <button class="skip" data-action="start" ${last ? "hidden" : ""}>Skip</button>
+        <div class="logo">${logoMark}<h2>MyWork</h2><p>Employee Self Service</p></div>
+        <div class="fade-in slide">
+          <p class="tagline">${sl.title}</p>
+          ${sl.text ? `<p class="small muted slide-text">${sl.text}</p>` : ""}
+        </div>
+        <div class="illus fade-in">${sl.art()}</div>
+        <div class="pager">${SLIDES.map((_, i) => `<button data-action="slideTo" data-i="${i}" class="${i === slide ? "on" : ""}" aria-label="Slide ${i + 1}"></button>`).join("")}</div>
+        <button class="btn" data-action="${last ? "start" : "nextSlide"}">${last ? "Get Started" : "Next"} ${ic("arrowR", 18)}</button>
+      </div>`,
+      mount() {
+        const el = $("#onboard");
+        let x0 = null;
+        el.addEventListener("pointerdown", (e) => { x0 = e.clientX; });
+        el.addEventListener("pointerup", (e) => {
+          if (x0 === null) return;
+          const dx = e.clientX - x0; x0 = null;
+          if (Math.abs(dx) < 50) return;
+          const next = Math.min(SLIDES.length - 1, Math.max(0, slide + (dx < 0 ? 1 : -1)));
+          if (next !== slide) { slide = next; render(); }
+        });
+      },
+    };
+  };
+
+  screens.login = () => ({
     full: true, noTabs: true,
     html: `
-      <div class="onboard fade-in">
-        <div class="logo">${logoMark}<h2>MyWork</h2><p>Employee Self Service</p></div>
-        <p class="tagline">Empowered Employees<br/>A More Productive Company</p>
-        <div class="illus">${onboardArt}</div>
-        <div class="pager"><span></span><span class="on"></span><span></span></div>
-        <button class="btn" data-action="start">Get Started ${ic("arrowR", 18)}</button>
+      <div class="login fade-in">
+        <div class="logo">${logoMark}<h2>MyWork</h2></div>
+        <h1 class="login-title">Welcome back</h1>
+        <p class="small muted" style="text-align:center;margin-bottom:24px">Sign in with your employee account.</p>
+        <form id="login-form" novalidate>
+          <div class="field"><label for="login-id">Employee ID</label>
+            <input class="input" id="login-id" name="id" autocomplete="username" placeholder="e.g. EMP00123" autocapitalize="characters"/></div>
+          <div class="field"><label for="login-pw">Password</label>
+            <div class="pw-wrap"><input class="input" id="login-pw" type="password" name="pw" autocomplete="current-password" placeholder="Your password"/>
+              <button type="button" class="icon-btn pw-toggle" id="pw-toggle" aria-label="Show password">${ic("eye", 18)}</button></div></div>
+          <p class="form-error" id="login-error" role="alert" hidden></p>
+          <button class="btn" type="submit" id="login-btn">Sign In</button>
+        </form>
+        <button class="link forgot" data-action="forgot">Forgot password?</button>
+        <div class="demo-hint">${ic("info", 16)}<span>Demo account: <b>${esc(state.user.id)}</b> / <b>password123</b></span></div>
       </div>`,
+    mount() {
+      const f = $("#login-form"), err = $("#login-error");
+      const toggle = $("#pw-toggle");
+      toggle.onclick = () => {
+        const show = f.pw.type === "password";
+        f.pw.type = show ? "text" : "password";
+        toggle.innerHTML = ic(show ? "eyeOff" : "eye", 18);
+        toggle.setAttribute("aria-label", show ? "Hide password" : "Show password");
+      };
+      f.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const fail = (msg) => { err.textContent = msg; err.hidden = false; };
+        const id = f.id.value.trim().toUpperCase();
+        if (!id || !f.pw.value) return fail("Enter your employee ID and password.");
+        const ok = id === state.user.id.toUpperCase() && (await sha256(f.pw.value)) === state.auth.hash;
+        if (!ok) { f.pw.value = ""; f.pw.focus(); return fail("Employee ID or password is incorrect."); }
+        state.auth.loggedIn = true; save();
+        go("#/home");
+        toast(`Welcome back, ${state.user.name.split(" ")[0]}`);
+      });
+    },
   });
 
   const MENU = [
@@ -310,7 +397,7 @@
         <div class="greet">
           ${avatar(46)}
           <div class="grow"><div class="small muted">Hello,</div><div class="bold" style="font-size:17px">${esc(state.user.name)}</div><div class="xs muted">${esc(state.user.role)}</div></div>
-          <button class="icon-btn" data-go="#/pengumuman" aria-label="Notifications">${ic("bell", 22)}${state.notifRead ? "" : '<span class="dot"></span>'}</button>
+          <button class="icon-btn" data-go="#/notifikasi" aria-label="Notifications${unread() ? `, ${unread()} unread` : ""}">${ic("bell", 22)}${unread() ? `<span class="count">${unread() > 9 ? "9+" : unread()}</span>` : ""}</button>
         </div>
         <div class="hero"><span class="sun"></span><span class="hill"></span>
           <h3>Have a great day!</h3><p>${greeting}. Stay motivated and be your best self today.</p>
@@ -367,7 +454,7 @@
           ? `<button class="btn ghost" disabled>${ic("check", 18)} Attendance Complete</button>`
           : `<button class="btn" data-action="${a.in ? "checkout" : "checkin"}">${a.in ? "Check Out" : "Check In"}</button>`}
         <div style="margin-top:20px">
-          <button class="list-item" data-action="history">${ic("history", 20, "var(--muted)")}<span class="grow">Attendance History</span><span class="chev">${ic("chevR", 18)}</span></button>
+          <button class="list-item" data-go="#/riwayat">${ic("history", 20, "var(--muted)")}<span class="grow">Attendance History</span><span class="chev">${ic("chevR", 18)}</span></button>
           <button class="list-item" data-action="location">${ic("pin", 20, "var(--muted)")}<span class="grow">My Location</span><span class="chev">${ic("chevR", 18)}</span></button>
         </div>
       </div>`,
@@ -385,7 +472,7 @@
       <div class="fade-in">
         <div class="chips">${CUTI_TABS.map((c, i) => `<button class="chip ${i === cutiTab ? "active" : ""}" data-action="cutiTab" data-i="${i}">${c}</button>`).join("")}</div>
         ${cutiTab === 0 ? `
-        <div class="balance"><div><div class="small bold" style="color:var(--primary)">Annual Leave Balance</div><div class="big">${left} days</div><div class="xs muted">of ${state.leave.total} days</div></div>${ic("palm", 54, "var(--green)", 1.6)}</div>` : `
+        <div class="balance"><div><div class="small bold" style="color:var(--primary)">Annual Leave Balance</div><div class="big">${plural(left, "day")}</div><div class="xs muted">of ${plural(state.leave.total, "day")}</div></div>${ic("palm", 54, "var(--green)", 1.6)}</div>` : `
         <div class="balance"><div><div class="small bold" style="color:var(--primary)">${CUTI_TABS[cutiTab]}</div><div class="small muted" style="margin-top:6px;max-width:220px">${cutiTab === 1 ? "A doctor's note is required for sick leave longer than 1 day." : "Marriage, maternity, bereavement or other special leave."}</div></div>${ic(cutiTab === 1 ? "heart" : "calendar", 44, "var(--primary)", 1.6)}</div>`}
         <form id="form-cuti" novalidate>
           <div class="field"><label>Leave Dates</label>
@@ -611,7 +698,6 @@
   const ANN_TABS = ["All", "Company", "HR", "IT"];
   let annTab = 0;
   screens.pengumuman = () => {
-    if (!state.notifRead) { state.notifRead = true; save(); }
     const list = ANNOUNCEMENTS.map((a, i) => ({ ...a, i })).filter((a) => annTab === 0 || a.cat === ANN_TABS[annTab]);
     return {
       html: `
@@ -694,6 +780,86 @@
     };
   };
 
+  const unread = () => state.notifications.filter((n) => !n.read).length;
+  function notify(n) {
+    state.notifications.unshift({ id: state.nextId++, ts: Date.now(), read: false, ...n });
+    state.notifications = state.notifications.slice(0, 50);
+  }
+
+  screens.notifikasi = () => ({
+    html: `
+      ${header("Notifications", { right: unread() ? `<button class="link" data-action="readAll">Mark all read</button>` : "" })}
+      <div class="fade-in">
+        ${state.notifications.map((n) => `
+          <button class="notif ${n.read ? "" : "unread"}" data-action="openNotif" data-id="${n.id}">
+            <span class="circle-ic" style="background:${COLOR[n.color][0]}">${ic(n.icon, 18, COLOR[n.color][1])}</span>
+            <div class="grow"><div class="row between"><span class="bold small">${esc(n.title)}</span><span class="xs muted">${ago(n.ts)}</span></div>
+              <p>${esc(n.body)}</p></div>
+          </button>`).join("") || `<div class="empty">You're all caught up.</div>`}
+      </div>`,
+  });
+
+  screens.approvals = () => {
+    const pending = state.requests.filter((r) => r.status === "Pending").sort((a, b) => a.created - b.created);
+    return {
+      html: `
+      ${header("Approvals")}
+      <div class="fade-in">
+        <div class="demo-hint" style="margin:0 0 16px">${ic("info", 16)}<span>Demo: act as your manager to approve or reject pending requests.</span></div>
+        ${pending.map((r) => {
+          const m = TYPE_META[r.type];
+          return `<div class="card approval">
+            <div class="row"><span class="circle-ic" style="background:${m.bg}">${ic(m.icon, 20, m.fg)}</span>
+              <div class="grow"><div class="bold small">${esc(r.title)}</div><div class="xs muted">${esc(state.user.name)} · ${ago(r.created)}</div></div>
+              <span class="badge orange">Pending</span></div>
+            <div class="small" style="margin:12px 0 4px"><b>${fmtRange(r.from, r.to)}</b>${r.type === "cuti" ? ` · ${plural(daysBetween(r.from, r.to), "day")}` : ""}${r.amount ? ` · ${idr(r.amount)}` : ""}</div>
+            <div class="small muted">${esc(r.note)}</div>
+            <div class="row" style="margin-top:14px">
+              <button class="btn ghost danger-ghost" data-action="reject" data-id="${r.id}">${ic("x", 16)} Reject</button>
+              <button class="btn" data-action="approve" data-id="${r.id}">${ic("check", 16)} Approve</button>
+            </div></div>`;
+        }).join("") || `<div class="empty">No pending requests.</div>`}
+      </div>`,
+    };
+  };
+
+  let histCursor = null;
+  screens.riwayat = () => {
+    if (!histCursor) { const d = new Date(); histCursor = new Date(d.getFullYear(), d.getMonth(), 1); }
+    const ym = `${histCursor.getFullYear()}-${pad(histCursor.getMonth() + 1)}`;
+    const a = state.attendance;
+    const all = (a.in ? [{ date: a.date, in: a.in, out: a.out }] : []).concat(state.history);
+    const recs = all.filter((h) => h.date.startsWith(ym)).sort((x, y) => (x.date < y.date ? 1 : -1));
+    const isLate = (h) => { const d = new Date(h.in); return d.getHours() * 60 + d.getMinutes() > 8 * 60; };
+    const done = recs.filter((h) => h.out);
+    const avg = done.length ? done.reduce((sum, h) => sum + (h.out - h.in), 0) / done.length : 0;
+    const now = new Date();
+    const atLatest = histCursor.getFullYear() === now.getFullYear() && histCursor.getMonth() === now.getMonth();
+    return {
+      html: `
+      ${header("Attendance History")}
+      <div class="fade-in">
+        <div class="cal-head card" style="padding:8px">
+          <button class="icon-btn" data-action="histPrev" aria-label="Previous month">${ic("chevL", 20)}</button>
+          <span>${MONTHS_LONG[histCursor.getMonth()]} ${histCursor.getFullYear()}</span>
+          <button class="icon-btn" data-action="histNext" aria-label="Next month" ${atLatest ? "disabled style=\"opacity:.3\"" : ""}>${ic("chevR", 20)}</button>
+        </div>
+        <div class="summary">
+          <div class="card"><div class="xs muted">Present</div><div class="big-num">${recs.length}<small> days</small></div></div>
+          <div class="card"><div class="xs muted">Late</div><div class="big-num" style="color:${recs.filter(isLate).length ? "var(--orange)" : "inherit"}">${recs.filter(isLate).length}<small> days</small></div></div>
+          <div class="card"><div class="xs muted">Avg. hours</div><div class="big-num">${done.length ? `${Math.floor(avg / 3600000)}h ${pad(Math.floor(avg / 60000) % 60)}m` : "–"}</div></div>
+        </div>
+        ${recs.map((h) => `
+          <div class="status-item">
+            <div class="date-tile"><b>${parseIso(h.date).getDate()}</b><span>${DAYS[parseIso(h.date).getDay()]}</span></div>
+            <div class="grow"><div class="small"><span class="muted xs">In</span> <b>${hm(h.in)}</b> &nbsp; <span class="muted xs">Out</span> <b>${h.out ? hm(h.out) : "–"}</b></div>
+              <div class="xs muted" style="margin-top:3px">Head Office${h.out ? ` · ${Math.floor((h.out - h.in) / 3600000)}h ${pad(Math.floor((h.out - h.in) / 60000) % 60)}m` : " · In progress"}</div></div>
+            <span class="badge ${isLate(h) ? "orange" : "green"}">${isLate(h) ? "Late" : "On time"}</span>
+          </div>`).join("") || `<div class="empty">No attendance records this month.</div>`}
+      </div>`,
+    };
+  };
+
   screens.bye = () => ({
     full: true, noTabs: true,
     html: `
@@ -710,6 +876,19 @@
   });
 
   // ---------- Actions ----------
+  const pendingCount = () => state.requests.filter((r) => r.status === "Pending").length;
+  // Manager decision on a request (demo approvals screen).
+  function review(id, status, note) {
+    const r = state.requests.find((x) => x.id === id);
+    if (!r || r.status !== "Pending") return;
+    r.status = status;
+    if (note) r.reviewNote = note;
+    if (status === "Rejected" && r.type === "cuti" && r.title === "Annual Leave") state.leave.used -= daysBetween(r.from, r.to);
+    const ok = status === "Approved";
+    notify({ title: `${r.title} ${ok ? "approved" : "rejected"}`, body: `Your ${r.title.toLowerCase()} request for ${fmtRange(r.from, r.to)} was ${ok ? "approved" : "rejected"}${note ? `: "${note}"` : "."}`,
+      icon: ok ? "check" : "x", color: ok ? "green" : "red", go: "#/status" });
+    save(); render(); toast(`Request ${status.toLowerCase()}`);
+  }
   function addRequest(r) {
     state.requests.push({ id: state.nextId++, status: "Pending", created: Date.now(), ...r });
     save();
@@ -736,16 +915,44 @@
   }
 
   const actions = {
-    start() { state.onboarded = true; save(); go("#/home"); },
-    logout() { state.onboarded = false; save(); closeSheet(); go("#/onboarding"); toast("You have logged out"); },
+    start() { state.onboarded = true; save(); go("#/login"); },
+    nextSlide() { slide = Math.min(SLIDES.length - 1, slide + 1); render(); },
+    slideTo(el) { slide = Number(el.dataset.i); render(); },
+    logout() { state.auth.loggedIn = false; save(); closeSheet(); go("#/login"); toast("You have logged out"); },
+    forgot() {
+      sheet(`<div class="bold" style="font-size:16px">Forgot your password?</div>
+        <p class="small muted" style="margin:8px 0 18px;line-height:1.5">Contact HR at <b>hr@company.co.id</b> to reset your password. In this demo you can restore the default password instead.</p>
+        <button class="btn" id="reset-pw">Reset to demo password</button><button class="btn ghost" data-close style="margin-top:10px">Cancel</button>`,
+        (s) => { $("#reset-pw", s).onclick = () => { state.auth.hash = DEFAULT_HASH; save(); closeSheet(); toast("Password reset to password123"); }; });
+    },
+    readAll() { state.notifications.forEach((n) => { n.read = true; }); save(); render(); },
+    openNotif(el) {
+      const n = state.notifications.find((x) => x.id === Number(el.dataset.id));
+      if (!n) return;
+      n.read = true; save();
+      go(n.go || "#/notifikasi");
+    },
+    approve(el) { review(Number(el.dataset.id), "Approved"); },
+    reject(el) {
+      const id = Number(el.dataset.id);
+      sheet(`<div class="bold" style="font-size:16px;margin-bottom:12px">Reject request</div>
+        <form id="reject-form"><div class="field"><label for="reject-note">Reason (optional)</label>
+          <textarea class="input" id="reject-note" name="note" placeholder="e.g. Team is short-staffed that week"></textarea></div>
+          <button class="btn danger" type="submit">Reject Request</button></form>`, (s) => {
+        $("#reject-form", s).onsubmit = (e) => { e.preventDefault(); closeSheet(); review(id, "Rejected", e.target.note.value.trim()); };
+      });
+    },
+    histPrev() { histCursor = new Date(histCursor.getFullYear(), histCursor.getMonth() - 1, 1); render(); },
+    histNext() { histCursor = new Date(histCursor.getFullYear(), histCursor.getMonth() + 1, 1); render(); },
     more() {
       sheet(`<div class="bold" style="margin-bottom:14px">More</div>
         <button class="list-item" data-close data-go="#/aktivitas">${ic("activity", 20, "var(--primary)")}<span class="grow">My Activity</span>${ic("chevR", 18)}</button>
         <button class="list-item" data-close data-go="#/reimburse">${ic("receipt", 20, "var(--green)")}<span class="grow">Reimbursement Request</span>${ic("chevR", 18)}</button>
+        <button class="list-item" data-close data-go="#/approvals">${ic("clipboard", 20, "var(--purple)")}<span class="grow">Approvals (demo)</span>${pendingCount() ? `<span class="badge orange">${pendingCount()}</span>` : ""}${ic("chevR", 18)}</button>
         <button class="list-item" data-close data-action="resetDemo">${ic("history", 20, "var(--orange)")}<span class="grow">Reset Demo Data</span>${ic("chevR", 18)}</button>
         <button class="list-item" data-close data-go="#/bye">${ic("logout", 20, "var(--red)")}<span class="grow">Log Out</span>${ic("chevR", 18)}</button>`);
     },
-    resetDemo() { state = seed(); state.onboarded = true; save(); render(); toast("Demo data restored"); },
+    resetDemo() { state = seed(); state.onboarded = true; state.auth.loggedIn = true; save(); render(); toast("Demo data restored"); },
     checkin() {
       state.attendance.in = Date.now(); save(); render(); toast(`Checked in at ${hm(state.attendance.in)}`);
     },
@@ -758,11 +965,6 @@
           <button class="btn" id="confirm-out">Yes, Check Out</button><button class="btn ghost" data-close style="margin-top:10px">Cancel</button>`,
           (s) => { $("#confirm-out", s).onclick = confirmOut; });
       } else confirmOut();
-    },
-    history() {
-      sheet(`<div class="bold" style="margin-bottom:12px">Attendance History</div>
-        ${state.history.slice(0, 15).map((h) => `<div class="info-row"><div class="grow"><div class="small bold">${fmtDay(parseIso(h.date))}</div><div class="xs muted">Head Office</div></div>
-          <div style="text-align:right"><div class="small"><span class="muted xs">In</span> <b>${hm(h.in)}</b></div><div class="small"><span class="muted xs">Out</span> <b>${h.out ? hm(h.out) : "-"}</b></div></div></div>`).join("") || '<div class="empty">No history yet.</div>'}`);
     },
     location() {
       sheet(`<div class="bold" style="margin-bottom:12px">My Location</div>
@@ -779,10 +981,11 @@
       const m = TYPE_META[r.type];
       sheet(`<div class="row" style="margin-bottom:14px"><span class="circle-ic" style="background:${m.bg}">${ic(m.icon, 20, m.fg)}</span>
           <div class="grow"><div class="bold">${esc(r.title)}</div><div class="xs muted">Submitted ${ago(r.created)}</div></div><span class="badge ${STATUS_BADGE[r.status]}">${r.status}</span></div>
-        <div class="info-row"><div class="grow xs muted">Date</div><div class="small bold">${fmtRange(r.from, r.to)}${r.type === "cuti" ? ` (${daysBetween(r.from, r.to)} days)` : ""}</div></div>
+        <div class="info-row"><div class="grow xs muted">Date</div><div class="small bold">${fmtRange(r.from, r.to)}${r.type === "cuti" ? ` (${plural(daysBetween(r.from, r.to), "day")})` : ""}</div></div>
         ${r.amount ? `<div class="info-row"><div class="grow xs muted">Amount</div><div class="small bold">${idr(r.amount)}</div></div>` : ""}
         ${r.category ? `<div class="info-row"><div class="grow xs muted">Category</div><div class="small bold">${esc(r.category)}</div></div>` : ""}
         <div class="info-row"><div class="grow xs muted">Description</div><div class="small bold" style="text-align:right;max-width:65%">${esc(r.note)}</div></div>
+        ${r.reviewNote ? `<div class="info-row"><div class="grow xs muted">Manager note</div><div class="small bold" style="text-align:right;max-width:65%">${esc(r.reviewNote)}</div></div>` : ""}
         ${r.status === "Pending" ? `<button class="btn danger" id="cancel-req" style="margin-top:16px">Cancel Request</button>` : ""}`,
         (s) => {
           const b = $("#cancel-req", s);
@@ -830,13 +1033,17 @@
         <div class="field"><label>New Password</label><input class="input" type="password" name="n1" autocomplete="new-password"/></div>
         <div class="field"><label>Confirm New Password</label><input class="input" type="password" name="n2" autocomplete="new-password"/></div>
         <button class="btn" type="submit">Save</button></form>`, (s) => {
-        $("#pw-form", s).onsubmit = (e) => {
+        $("#pw-form", s).onsubmit = async (e) => {
           e.preventDefault();
           const f = e.target;
           if (!f.old.value) return toast("Enter your current password");
+          if ((await sha256(f.old.value)) !== state.auth.hash) return toast("Current password is incorrect");
           if (f.n1.value.length < 8) return toast("Password must be at least 8 characters");
           if (f.n1.value !== f.n2.value) return toast("Passwords do not match");
-          closeSheet(); toast("Password changed");
+          if (f.n1.value === f.old.value) return toast("New password must be different");
+          state.auth.hash = await sha256(f.n1.value);
+          notify({ title: "Password changed", body: "Your account password was changed. If this wasn't you, contact IT.", icon: "lock", color: "purple", go: "#/profil" });
+          save(); closeSheet(); toast("Password changed");
         };
       });
     },
@@ -888,8 +1095,9 @@
 
   function route() {
     const r = (location.hash.replace(/^#\/?/, "") || "").split("?")[0];
-    if (!state.onboarded && r !== "bye") return "onboarding";
-    if (!r || !screens[r] || r === "onboarding") return "home";
+    if (!state.onboarded) return "onboarding";
+    if (!state.auth.loggedIn) return "login";
+    if (!r || !screens[r] || r === "onboarding" || r === "login") return "home";
     return r;
   }
   function go(hash) { if (location.hash === hash) render(); else location.hash = hash; }
