@@ -51,6 +51,9 @@ On desktop the app shows inside a phone frame. On a phone it fills the screen.
 
 1. **Create the database.** In Supabase Studio, open **SQL Editor → New query**, paste all of
    [`supabase/schema.sql`](supabase/schema.sql), and click **Run**. It is safe to run again later.
+   If the paste gets cut off (an "unterminated dollar-quoted string" error), run the 9 smaller files in
+   [`supabase/parts/`](supabase/parts) one at a time, in order, instead. They contain the same SQL;
+   regenerate them with `python3 supabase/split_schema.py` after editing `schema.sql`.
    Everything it creates starts with `mywork_` (tables, functions, triggers) or `mywork-` (the two
    private storage buckets), so it never touches other apps on the same server.
 2. **Turn off public sign-ups.** HR should create employee accounts, so strangers can't sign up.
