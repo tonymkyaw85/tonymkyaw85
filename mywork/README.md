@@ -51,16 +51,22 @@ On desktop the app shows inside a phone frame. On a phone it fills the screen.
 
 1. **Create the database.** In Supabase Studio, open **SQL Editor → New query**, paste all of
    [`supabase/schema.sql`](supabase/schema.sql), and click **Run**. It is safe to run again later.
-   It creates the tables, security rules, triggers, and two private storage buckets
-   (`documents`, `request-attachments`).
+   Everything it creates starts with `mywork_` (tables, functions, triggers) or `mywork-` (the two
+   private storage buckets), so it never touches other apps on the same server.
 2. **Turn off public sign-ups.** HR should create employee accounts, so strangers can't sign up.
    On self-hosted Supabase, set `DISABLE_SIGNUP=true` in your `.env` and restart.
-3. **Add people.** Open **Authentication → Users → Add user** for each employee, then fill in their
-   row in **Table Editor → profiles** (`employee_id`, `full_name`, `job_title`, `department`, …).
-   To make someone a manager who can approve requests, set `app_role` to `manager`.
-4. **Optional demo data.** Create two users (an employee and a manager), then run
+3. **Add people.** Create each person in **Authentication → Users → Add user** (tick **Auto Confirm User**),
+   then add them to MyWork in the SQL Editor:
+   ```sql
+   select public.mywork_add_employee('ahmad@company.com', 'EMP00123', 'Ahmad Fauzi', 'IT Support', 'Information Technology');
+   select public.mywork_add_employee('siti@company.com', 'EMP00007', 'Siti Rahma', 'IT Manager', 'Information Technology', 'manager');
+   ```
+   The last value is `employee` (default) or `manager`; managers can approve requests. Accounts that
+   exist on the server but weren't added this way can't sign in to MyWork.
+4. **Optional demo data.** With two users created, run
    `select public.mywork_seed_demo('employee@your-domain.com', 'manager@your-domain.com');`
-   in the SQL Editor. This adds sample attendance, requests, payslips, schedule and announcements.
+   It adds them to MyWork (as EMP00123 and EMP00007) with sample attendance, requests, payslips,
+   schedule and announcements.
 5. **Password reset emails** need SMTP configured on your Supabase server (`SMTP_*` in `.env`),
    and the app's address added to the allowed redirect URLs (`ADDITIONAL_REDIRECT_URLS`).
 6. **Host the app.** Upload the `mywork/` folder to any static host (your own domain, Vercel,
@@ -81,7 +87,7 @@ Enforced by the database (row level security), not the app:
 | Approve or reject **other people's** requests | | ✔ |
 | See other people's documents or payslips | | |
 
-Announcements, payslips and schedule events are added by HR in the Table Editor. Every new
+Announcements, payslips and schedule events are added by HR in the Table Editor (`mywork_announcements`, `mywork_payslips`, `mywork_schedule_events`). Every new
 announcement notifies all active employees automatically.
 
 ## Files

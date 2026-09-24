@@ -409,6 +409,7 @@
             await BE.signIn(email, f.pw.value);
             await hydrate();
           } catch (ex) {
+            await BE.signOut().catch(() => {});
             btn.disabled = false; btn.textContent = "Sign In";
             f.pw.value = ""; f.pw.focus();
             return fail(ex.message);
@@ -1340,6 +1341,7 @@
         if (await BE.hasSession()) await hydrate();
       } catch (ex) {
         state.auth.loggedIn = false;
+        await BE.signOut().catch(() => {});
         fail(ex);
       }
       render();

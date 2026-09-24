@@ -86,15 +86,16 @@
     async load(today) {
       const since = addDays(today, -120);
       const [profile, attendance, requests, notifications, announcements, docs, payslips, events] = await Promise.all([
-        sb.from("profiles").select("*").eq("id", uid).single(),
-        sb.from("attendance").select("*").eq("user_id", uid).gte("work_date", since).order("work_date", { ascending: false }),
-        sb.from("requests").select("*").eq("user_id", uid).order("created_at", { ascending: false }).limit(200),
-        sb.from("notifications").select("*").order("created_at", { ascending: false }).limit(50),
-        sb.from("announcements").select("*").order("published_on", { ascending: false }).limit(50),
-        sb.from("documents").select("*").order("created_at"),
-        sb.from("payslips").select("*").order("period", { ascending: false }),
-        sb.from("schedule_events").select("*").gte("event_date", addDays(today, -180)).lte("event_date", addDays(today, 180)),
+        sb.from("mywork_profiles").select("*").eq("id", uid).maybeSingle(),
+        sb.from("mywork_attendance").select("*").eq("user_id", uid).gte("work_date", since).order("work_date", { ascending: false }),
+        sb.from("mywork_requests").select("*").eq("user_id", uid).order("created_at", { ascending: false }).limit(200),
+        sb.from("mywork_notifications").select("*").order("created_at", { ascending: false }).limit(50),
+        sb.from("mywork_announcements").select("*").order("published_on", { ascending: false }).limit(50),
+        sb.from("mywork_documents").select("*").order("created_at"),
+        sb.from("mywork_payslips").select("*").order("period", { ascending: false }),
+        sb.from("mywork_schedule_events").select("*").gte("event_date", addDays(today, -180)).lte("event_date", addDays(today, 180)),
       ]).then((results) => results.map(must));
+      if (!profile) throw new Error("Your account isn't set up for MyWork yet. Ask HR to add you.");
 
       const att = attendance.map(mapAttendance);
       const todays = att.find((a) => a.date === today);
@@ -127,72 +128,72 @@
 
     // Managers: every pending request from other employees, with the requester's name.
     async loadPending() {
-      const rows = must(await sb.from("requests").select("*").eq("status", "Pending").neq("user_id", uid).order("created_at"));
+      const rows = must(await sb.from("mywork_requests").select("*").eq("status", "Pending").neq("user_id", uid).order("created_at"));
       const ids = [...new Set(rows.map((r) => r.user_id))];
-      const people = ids.length ? must(await sb.from("profiles").select("id, full_name").in("id", ids)) : [];
+      const people = ids.length ? must(await sb.from("mywork_profiles").select("id, full_name").in("id", ids)) : [];
       const names = Object.fromEntries(people.map((p) => [p.id, p.full_name]));
       return rows.map((r) => ({ ...mapRequest(r), requester: names[r.user_id] || "Employee" }));
     },
 
     async checkIn(today, location) {
-      return mapAttendance(must(await sb.from("attendance").insert({ work_date: today, location }).select().single()));
+      return mapAttendance(must(await sb.from("mywork_attendance").insert({ work_date: today, location }).select().single()));
     },
     async checkOut(rowId) {
       // The server sets the real check-out time; the value sent here is ignored.
-      return mapAttendance(must(await sb.from("attendance").update({ check_out: new Date().toISOString() }).eq("id", rowId).select().single()));
+      return mapAttendance(must(await sb.from("mywork_attendance").update({ check_out: new Date().toISOString() }).eq("id", rowId).select().single()));
     },
 
     async addRequest(r, file) {
       let attachment_path = null;
       if (file) {
         attachment_path = `${uid}/${Date.now()}-${safeName(file.name)}`;
-        must(await sb.storage.from("request-attachments").upload(attachment_path, file, { contentType: file.type || undefined }));
+        must(await sb.storage.from("mywork-request-attachments").upload(attachment_path, file, { contentType: file.type || undefined }));
       }
-      const row = must(await sb.from("requests").insert({
+      const row = must(await sb.from("mywork_requests").insert({
         type: r.type, title: r.title, date_from: r.from, date_to: r.to, note: r.note,
         amount: r.amount ?? null, category: r.category ?? null, attachment_path,
       }).select().single());
       return mapRequest(row);
     },
     async cancelRequest(id) {
-      const rows = must(await sb.from("requests").delete().eq("id", id).select("id"));
+      const rows = must(await sb.from("mywork_requests").delete().eq("id", id).select("id"));
       if (!rows.length) throw new Error("This request can no longer be cancelled.");
     },
     async review(id, status, note) {
-      return mapRequest(must(await sb.rpc("review_request", { p_id: id, p_status: status, p_note: note || null })));
+      return mapRequest(must(await sb.rpc("mywork_review_request", { p_id: id, p_status: status, p_note: note || null })));
     },
     async attachmentUrl(path) {
-      return must(await sb.storage.from("request-attachments").createSignedUrl(path, 300)).signedUrl;
+      return must(await sb.storage.from("mywork-request-attachments").createSignedUrl(path, 300)).signedUrl;
     },
 
     async markRead(id) {
-      let q = sb.from("notifications").update({ read: true }).eq("read", false);
+      let q = sb.from("mywork_notifications").update({ read: true }).eq("read", false);
       if (id != null) q = q.eq("id", id);
       must(await q);
     },
     async updateProfile({ phone, address }) {
-      must(await sb.from("profiles").update({ phone, address }).eq("id", uid));
+      must(await sb.from("mywork_profiles").update({ phone, address }).eq("id", uid));
     },
 
     async uploadDoc(file, kind) {
       const path = `${uid}/${Date.now()}-${safeName(file.name)}`;
-      must(await sb.storage.from("documents").upload(path, file, { contentType: file.type || undefined }));
+      must(await sb.storage.from("mywork-documents").upload(path, file, { contentType: file.type || undefined }));
       try {
-        const row = must(await sb.from("documents").insert({
+        const row = must(await sb.from("mywork_documents").insert({
           name: file.name.replace(/\.[^.]+$/, ""), file_name: file.name, size_bytes: file.size, kind, storage_path: path,
         }).select().single());
         return mapDoc(row);
       } catch (e) {
-        await sb.storage.from("documents").remove([path]);
+        await sb.storage.from("mywork-documents").remove([path]);
         throw e;
       }
     },
     async docUrl(doc, download) {
-      return must(await sb.storage.from("documents").createSignedUrl(doc.path, 300, download ? { download: doc.file } : undefined)).signedUrl;
+      return must(await sb.storage.from("mywork-documents").createSignedUrl(doc.path, 300, download ? { download: doc.file } : undefined)).signedUrl;
     },
     async deleteDoc(doc) {
-      must(await sb.from("documents").delete().eq("id", doc.id));
-      await sb.storage.from("documents").remove([doc.path]);
+      must(await sb.from("mywork_documents").delete().eq("id", doc.id));
+      await sb.storage.from("mywork-documents").remove([doc.path]);
     },
   };
 
