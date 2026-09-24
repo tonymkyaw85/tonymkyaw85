@@ -1022,11 +1022,6 @@
       state.auth.loggedIn = false; save(); closeSheet(); go("#/login"); toast("You have logged out");
     },
     forgot() {
-      if (BE && !BE.canResetByEmail) {
-        return sheet(`<div class="bold" style="font-size:16px">Forgot your password?</div>
-          <p class="small muted" style="margin:8px 0 18px;line-height:1.5">Ask HR to reset it for you. They'll give you a new password, which you can change later in Profile → Settings.</p>
-          <button class="btn ghost" data-close>OK</button>`);
-      }
       if (BE) {
         const typed = ($("#login-id") || {}).value || "";
         return sheet(`<div class="bold" style="font-size:16px">Reset your password</div>
@@ -1145,7 +1140,7 @@
       try {
         const url = await BE.attachmentUrl(el.dataset.path);
         sheet(`<div class="bold" style="margin-bottom:12px">Attachment</div>
-          ${BE.linkNote === "" ? "" : `<p class="small muted" style="margin-bottom:16px">${BE.linkNote ?? "The link works for 5 minutes."}</p>`}
+          <p class="small muted" style="margin-bottom:16px">The link works for 5 minutes.</p>
           <a class="btn" href="${esc(url)}" target="_blank" rel="noopener">${ic("eye", 18)} Open attachment</a>`);
       } catch (ex) { fail(ex); }
     },
@@ -1245,7 +1240,7 @@
           return sheet(`<div class="bold" style="margin-bottom:12px">${esc(d.name)}</div>
             ${isImg ? `<img src="${esc(url)}" alt="${esc(d.name)}" style="width:100%;border-radius:12px;margin-bottom:14px"/>` : ""}
             <a class="btn" href="${esc(url)}" target="_blank" rel="noopener">${ic("eye", 18)} Open ${esc(d.file)}</a>
-            ${BE.linkNote === "" ? "" : `<p class="xs muted" style="text-align:center;margin-top:10px">${BE.linkNote ?? "The link works for 5 minutes."}</p>`}`);
+            <p class="xs muted" style="text-align:center;margin-top:10px">The link works for 5 minutes.</p>`);
         } catch (ex) { return fail(ex); }
       }
       sheet(`<div class="bold" style="margin-bottom:12px">${esc(d.name)}</div>
@@ -1259,7 +1254,7 @@
         const url = await BE.docUrl(d, true);
         sheet(`<div class="bold" style="margin-bottom:12px">Download ${esc(d.file)}</div>
           <a class="btn" href="${esc(url)}" rel="noopener">${ic("download", 18)} Download</a>
-          ${BE.linkNote === "" ? "" : `<p class="xs muted" style="text-align:center;margin-top:10px">${BE.linkNote ?? "The link works for 5 minutes."}</p>`}`);
+          <p class="xs muted" style="text-align:center;margin-top:10px">The link works for 5 minutes.</p>`);
       } catch (ex) { fail(ex); }
     },
     async docDelete(el) {
