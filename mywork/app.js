@@ -144,11 +144,33 @@
     return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 
+  // Backend mode: data lives in Supabase (see backend.js); only the "seen onboarding" flag stays local.
+  const BE = window.MyWorkBackend;
+  const ONBOARDED_KEY = "mywork-onboarded";
+  function emptyState() {
+    let onboarded = false;
+    try { onboarded = localStorage.getItem(ONBOARDED_KEY) === "1"; } catch { /* storage unavailable */ }
+    return {
+      ...seed(), onboarded, auth: { loggedIn: false }, user: { name: "", role: "", id: "—", status: "", email: "", phone: "", dept: "", joined: today(), address: "" },
+      attendance: { date: today(), in: null, out: null, location: "Head Office" }, history: [], requests: [], docs: [],
+      notifications: [], payslips: {}, events: [], pending: [], isManager: false,
+    };
+  }
+
   let state;
-  // Merge over fresh seed data so fields added in newer versions get defaults.
-  try { state = Object.assign(seed(), JSON.parse(localStorage.getItem(KEY)) || {}); } catch { state = seed(); }
-  delete state.notifRead;
-  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* storage unavailable */ } };
+  if (BE) state = emptyState();
+  else {
+    // Merge over fresh seed data so fields added in newer versions get defaults.
+    try { state = Object.assign(seed(), JSON.parse(localStorage.getItem(KEY)) || {}); } catch { state = seed(); }
+    delete state.notifRead;
+  }
+  const save = () => {
+    try {
+      if (BE) localStorage.setItem(ONBOARDED_KEY, state.onboarded ? "1" : "0");
+      else localStorage.setItem(KEY, JSON.stringify(state));
+    } catch { /* storage unavailable */ }
+  };
+  const fail = (e) => toast(e && e.message ? e.message : "Something went wrong. Please try again.");
 
   // Roll attendance over to a new day, archiving yesterday's record.
   function syncAttendanceDay() {
@@ -162,7 +184,7 @@
   syncAttendanceDay();
 
   // ---------- Static content ----------
-  const ANNOUNCEMENTS = [
+  let ANNOUNCEMENTS = [
     { cat: "Company", icon: "megaphone", color: "red", title: "National Holiday", date: "2026-09-12",
       body: "In observance of the Prophet's Birthday, the office will be closed on 28 Sep 2026. Normal operations resume on Tuesday, 29 Sep 2026. Teams on duty, please coordinate with your supervisors." },
     { cat: "HR", icon: "file", color: "blue", title: "Work From Office Policy Update", date: "2026-09-10",
@@ -184,7 +206,16 @@
     { time: "15:00", title: "Weekly Report", place: "Online Meeting", color: "var(--purple)" },
     { time: "16:00", title: "Database Backup", place: "Data Center", color: "var(--green)" },
   ];
+  const holidayOn = (dateStr) => BE ? (state.events.find((e) => e.holiday && e.date === dateStr) || {}).title : HOLIDAYS[dateStr];
   function agendaFor(dateStr) {
+    if (BE) {
+      const leave = state.requests.find((r) => r.type === "cuti" && r.status !== "Rejected" && dateStr >= r.from && dateStr <= r.to);
+      const items = state.events.filter((e) => e.date === dateStr)
+        .map((e) => ({ time: e.time, title: e.title, place: e.holiday ? "Office closed" : e.place, color: (COLOR[e.color] || COLOR.blue)[1] }))
+        .sort((a, b) => (a.time < b.time ? -1 : 1));
+      if (leave) items.unshift({ time: "—", title: leave.title, place: `Status: ${leave.status}`, color: "var(--orange)" });
+      return items;
+    }
     if (HOLIDAYS[dateStr]) return [{ time: "—", title: HOLIDAYS[dateStr], place: "Office closed", color: "var(--red)" }];
     const d = parseIso(dateStr);
     if (d.getDay() === 0 || d.getDay() === 6) return [];
@@ -343,8 +374,11 @@
         <h1 class="login-title">Welcome back</h1>
         <p class="small muted" style="text-align:center;margin-bottom:24px">Sign in with your employee account.</p>
         <form id="login-form" novalidate>
-          <div class="field"><label for="login-id">Employee ID</label>
-            <input class="input" id="login-id" name="id" autocomplete="username" placeholder="e.g. EMP00123" autocapitalize="characters"/></div>
+          ${BE
+            ? `<div class="field"><label for="login-id">Work Email</label>
+            <input class="input" id="login-id" name="id" type="email" autocomplete="username" placeholder="name@company.com" autocapitalize="off"/></div>`
+            : `<div class="field"><label for="login-id">Employee ID</label>
+            <input class="input" id="login-id" name="id" autocomplete="username" placeholder="e.g. EMP00123" autocapitalize="characters"/></div>`}
           <div class="field"><label for="login-pw">Password</label>
             <div class="pw-wrap"><input class="input" id="login-pw" type="password" name="pw" autocomplete="current-password" placeholder="Your password"/>
               <button type="button" class="icon-btn pw-toggle" id="pw-toggle" aria-label="Show password">${ic("eye", 18)}</button></div></div>
@@ -352,7 +386,7 @@
           <button class="btn" type="submit" id="login-btn">Sign In</button>
         </form>
         <button class="link forgot" data-action="forgot">Forgot password?</button>
-        <div class="demo-hint">${ic("info", 16)}<span>Demo account: <b>${esc(state.user.id)}</b> / <b>password123</b></span></div>
+        ${BE ? "" : `<div class="demo-hint">${ic("info", 16)}<span>Demo account: <b>${esc(state.user.id)}</b> / <b>password123</b></span></div>`}
       </div>`,
     mount() {
       const f = $("#login-form"), err = $("#login-error");
@@ -366,6 +400,22 @@
       f.addEventListener("submit", async (e) => {
         e.preventDefault();
         const fail = (msg) => { err.textContent = msg; err.hidden = false; };
+        if (BE) {
+          const email = f.id.value.trim();
+          if (!email || !f.pw.value) return fail("Enter your work email and password.");
+          const btn = $("#login-btn");
+          btn.disabled = true; btn.textContent = "Signing in…"; err.hidden = true;
+          try {
+            await BE.signIn(email, f.pw.value);
+            await hydrate();
+          } catch (ex) {
+            btn.disabled = false; btn.textContent = "Sign In";
+            f.pw.value = ""; f.pw.focus();
+            return fail(ex.message);
+          }
+          go("#/home");
+          return toast(`Welcome back, ${state.user.name.split(" ")[0]}`);
+        }
         const id = f.id.value.trim().toUpperCase();
         if (!id || !f.pw.value) return fail("Enter your employee ID and password.");
         const ok = id === state.user.id.toUpperCase() && (await sha256(f.pw.value)) === state.auth.hash;
@@ -487,7 +537,7 @@
         const f = $("#form-cuti");
         bindFileLabel(f);
         f.from.addEventListener("change", () => { f.to.min = f.from.value; if (f.to.value < f.from.value) f.to.value = f.from.value; });
-        f.addEventListener("submit", (e) => {
+        f.addEventListener("submit", async (e) => {
           e.preventDefault();
           const from = f.from.value, to = f.to.value, note = f.note.value.trim();
           if (!from || !to) return toast("Select your leave dates");
@@ -495,8 +545,8 @@
           if (!note) return toast("Please enter a reason");
           const days = daysBetween(from, to);
           if (cutiTab === 0 && days > state.leave.total - state.leave.used) return toast("Not enough leave balance");
-          if (cutiTab === 0) state.leave.used += days;
-          addRequest({ type: "cuti", title: CUTI_TABS[cutiTab], from, to, note });
+          if (!(await addRequest({ type: "cuti", title: CUTI_TABS[cutiTab], from, to, note }, f))) return;
+          if (!BE && cutiTab === 0) { state.leave.used += days; save(); }
           toast(`${CUTI_TABS[cutiTab]} request submitted`);
           go("#/status");
         });
@@ -523,7 +573,7 @@
       mount() {
         const f = $("#form-simple");
         bindFileLabel(f);
-        f.addEventListener("submit", (e) => {
+        f.addEventListener("submit", async (e) => {
           e.preventDefault();
           let note = f.note.value.trim();
           if (!f.date.value) return toast("Select a date");
@@ -532,7 +582,7 @@
             if (!f.start.value || !f.end.value || f.end.value <= f.start.value) return toast("Overtime hours are invalid");
             note += ` (${f.start.value}–${f.end.value})`;
           } else note = `${f.sub.value}: ${note}`;
-          addRequest({ type: kind, title: isLembur ? "Overtime" : "Permission", from: f.date.value, to: f.date.value, note });
+          if (!(await addRequest({ type: kind, title: isLembur ? "Overtime" : "Permission", from: f.date.value, to: f.date.value, note }, f))) return;
           toast("Request submitted");
           go("#/status");
         });
@@ -571,14 +621,14 @@
         pick.hidden = true;
         att.querySelector("[data-remove]").onclick = () => { f.file.value = ""; att.innerHTML = ""; pick.hidden = false; };
       });
-      f.addEventListener("submit", (e) => {
+      f.addEventListener("submit", async (e) => {
         e.preventDefault();
         const amount = Number(amt.value.replace(/\D/g, ""));
         if (!f.date.value) return toast("Select a date");
         if (!amount) return toast("Enter an amount");
         if (!f.note.value.trim()) return toast("Please enter a description");
         if (!f.file.files[0]) return toast("Attach a receipt");
-        addRequest({ type: "reimburse", title: "Reimbursement", from: f.date.value, to: f.date.value, note: f.note.value.trim(), amount, category: f.category.value });
+        if (!(await addRequest({ type: "reimburse", title: "Reimbursement", from: f.date.value, to: f.date.value, note: f.note.value.trim(), amount, category: f.category.value }, f))) return;
         toast("Reimbursement submitted");
         go("#/status");
       });
@@ -612,6 +662,13 @@
   let slipMonth = (() => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; })();
   let showSalary = true;
   function payslip(ym) {
+    if (BE) {
+      const p = state.payslips[ym];
+      if (!p) return null;
+      const earn = p.earn.map(([k, v]) => [k, Number(v)]), ded = p.ded.map(([k, v]) => [k, Number(v)]);
+      const gross = earn.reduce((s, e) => s + e[1], 0);
+      return { earn, ded, gross, net: gross - ded.reduce((s, d) => s + d[1], 0) };
+    }
     const m = Number(ym.split("-")[1]);
     const lembur = [300000, 450000, 250000, 600000, 450000, 350000, 500000, 400000, 450000, 550000, 300000, 650000][m - 1];
     const earn = [["Basic Salary", 6500000], ["Transport Allowance", 750000], ["Meal Allowance", 900000], ["Overtime", lembur]];
@@ -634,14 +691,15 @@
           <input type="month" id="slip-month" value="${slipMonth}" max="${today().slice(0, 7)}" style="position:absolute;inset:0;opacity:0;cursor:pointer"/>
         </label>
         <div class="salary"><div class="small" style="opacity:.85">Total Net Salary</div>
-          <div class="amount">${showSalary ? idr(p.net) : "Rp ••••••••"}</div>
+          <div class="amount">${!p ? "Not available" : showSalary ? idr(p.net) : "Rp ••••••••"}</div>
           <button class="icon-btn" data-action="toggleSalary" aria-label="${showSalary ? "Hide" : "Show"} salary">${ic(showSalary ? "eye" : "eyeOff", 22, "#fff")}</button>
         </div>
         <div class="card row" style="margin-bottom:16px">${avatar(40)}
           <div class="grow"><div class="bold small">${esc(state.user.name)}</div><div class="xs muted">${esc(state.user.role)}</div></div>
           <span class="xs muted">${esc(state.user.id)}</span></div>
-        <button class="list-item" data-action="slipDetail">${ic("file", 20, "var(--muted)")}<span class="grow">Salary Details</span><span class="chev">${ic("chevR", 18)}</span></button>
-        <button class="list-item" data-action="slipDownload">${ic("download", 20, "var(--muted)")}<span class="grow">Download Payslip (PDF)</span><span class="chev">${ic("chevR", 18)}</span></button>
+        ${p ? "" : `<div class="demo-hint" style="margin:0 0 16px">${ic("info", 16)}<span>There's no payslip for ${monthLabel(slipMonth)} yet. Pick another month or check Payslip History.</span></div>`}
+        <button class="list-item" data-action="slipDetail" ${p ? "" : "hidden"}>${ic("file", 20, "var(--muted)")}<span class="grow">Salary Details</span><span class="chev">${ic("chevR", 18)}</span></button>
+        <button class="list-item" data-action="slipDownload" ${p ? "" : "hidden"}>${ic("download", 20, "var(--muted)")}<span class="grow">Download Payslip (PDF)</span><span class="chev">${ic("chevR", 18)}</span></button>
         <button class="list-item" data-action="slipHistory">${ic("history", 20, "var(--muted)")}<span class="grow">Payslip History</span><span class="chev">${ic("chevR", 18)}</span></button>
       </div>`,
       mount() {
@@ -653,9 +711,9 @@
   const slipTable = (p) => `
     <table class="table">
       <tr><td colspan="2" class="xs muted bold" style="border:0;padding-bottom:2px;text-align:left">EARNINGS</td></tr>
-      ${p.earn.map(([k, v]) => `<tr><td>${k}</td><td>${idr(v)}</td></tr>`).join("")}
+      ${p.earn.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${idr(v)}</td></tr>`).join("")}
       <tr><td colspan="2" class="xs muted bold" style="border:0;padding:14px 0 2px;text-align:left">DEDUCTIONS</td></tr>
-      ${p.ded.map(([k, v]) => `<tr><td>${k}</td><td style="color:var(--red)">-${idr(v)}</td></tr>`).join("")}
+      ${p.ded.map(([k, v]) => `<tr><td>${esc(k)}</td><td style="color:var(--red)">-${idr(v)}</td></tr>`).join("")}
       <tr class="total"><td>Net Salary</td><td style="color:var(--primary)">${idr(p.net)}</td></tr>
     </table>`;
 
@@ -671,7 +729,7 @@
       if (i === 35 && d.getMonth() !== m) break;
       const s = iso(d);
       const cls = [d.getMonth() !== m && "out", s === today() && "today", s === calSel && "sel",
-        (HOLIDAYS[s] || state.requests.some((r) => r.type === "cuti" && r.status !== "Rejected" && s >= r.from && s <= r.to)) && "has"].filter(Boolean).join(" ");
+        (holidayOn(s) || state.requests.some((r) => r.type === "cuti" && r.status !== "Rejected" && s >= r.from && s <= r.to)) && "has"].filter(Boolean).join(" ");
       cells.push(`<button class="${cls}" data-action="pickDay" data-d="${s}" aria-label="${fmtDate(d)}">${d.getDate()}</button>`);
     }
     const items = agendaFor(calSel);
@@ -690,7 +748,7 @@
         ${items.length ? items.map((it) => `
           <div class="agenda"><span class="t">${it.time}</span>
             <div class="body" style="border-color:${it.color}"><div class="bold small">${esc(it.title)}</div><div class="xs muted" style="margin-top:2px">${esc(it.place)}</div></div></div>`).join("")
-          : `<div class="empty">No agenda – it's the weekend</div>`}
+          : `<div class="empty">${[0, 6].includes(selD.getDay()) ? "No agenda – it's the weekend" : "No agenda for this day"}</div>`}
       </div>`,
     };
   };
@@ -746,11 +804,18 @@
         <label class="btn" style="margin-top:20px">${ic("upload", 18)} Upload Document<input type="file" id="doc-upload" hidden/></label>
       </div>`,
     mount() {
-      $("#doc-upload").addEventListener("change", (e) => {
+      $("#doc-upload").addEventListener("change", async (e) => {
         const file = e.target.files[0];
         if (!file) return;
         const kinds = Object.keys(COLOR);
-        state.docs.push({ id: state.nextId++, name: file.name.replace(/\.[^.]+$/, ""), file: file.name, size: file.size, kind: kinds[state.docs.length % kinds.length] });
+        const kind = kinds[state.docs.length % kinds.length];
+        if (BE) {
+          if (file.size > 10 * 1048576) return toast("Files must be 10 MB or smaller");
+          toast("Uploading…");
+          try { state.docs.push(await BE.uploadDoc(file, kind)); } catch (ex) { return fail(ex); }
+        } else {
+          state.docs.push({ id: state.nextId++, name: file.name.replace(/\.[^.]+$/, ""), file: file.name, size: file.size, kind });
+        }
         save(); render(); toast("Document uploaded");
       });
     },
@@ -782,6 +847,7 @@
 
   const unread = () => state.notifications.filter((n) => !n.read).length;
   function notify(n) {
+    if (BE) return; // the database creates notifications
     state.notifications.unshift({ id: state.nextId++, ts: Date.now(), read: false, ...n });
     state.notifications = state.notifications.slice(0, 50);
   }
@@ -800,20 +866,21 @@
   });
 
   screens.approvals = () => {
-    const pending = state.requests.filter((r) => r.status === "Pending").sort((a, b) => a.created - b.created);
+    const pending = BE ? state.pending : state.requests.filter((r) => r.status === "Pending").sort((a, b) => a.created - b.created);
     return {
       html: `
       ${header("Approvals")}
       <div class="fade-in">
-        <div class="demo-hint" style="margin:0 0 16px">${ic("info", 16)}<span>Demo: act as your manager to approve or reject pending requests.</span></div>
+        ${BE ? "" : `<div class="demo-hint" style="margin:0 0 16px">${ic("info", 16)}<span>Demo: act as your manager to approve or reject pending requests.</span></div>`}
         ${pending.map((r) => {
           const m = TYPE_META[r.type];
           return `<div class="card approval">
             <div class="row"><span class="circle-ic" style="background:${m.bg}">${ic(m.icon, 20, m.fg)}</span>
-              <div class="grow"><div class="bold small">${esc(r.title)}</div><div class="xs muted">${esc(state.user.name)} · ${ago(r.created)}</div></div>
+              <div class="grow"><div class="bold small">${esc(r.title)}</div><div class="xs muted">${esc(r.requester || state.user.name)} · ${ago(r.created)}</div></div>
               <span class="badge orange">Pending</span></div>
             <div class="small" style="margin:12px 0 4px"><b>${fmtRange(r.from, r.to)}</b>${r.type === "cuti" ? ` · ${plural(daysBetween(r.from, r.to), "day")}` : ""}${r.amount ? ` · ${idr(r.amount)}` : ""}</div>
             <div class="small muted">${esc(r.note)}</div>
+            ${r.attachment ? `<button class="link" style="margin-top:6px;padding:0" data-action="openAttachment" data-path="${esc(r.attachment)}">${ic("file", 14)} View attachment</button>` : ""}
             <div class="row" style="margin-top:14px">
               <button class="btn ghost danger-ghost" data-action="reject" data-id="${r.id}">${ic("x", 16)} Reject</button>
               <button class="btn" data-action="approve" data-id="${r.id}">${ic("check", 16)} Approve</button>
@@ -876,9 +943,16 @@
   });
 
   // ---------- Actions ----------
-  const pendingCount = () => state.requests.filter((r) => r.status === "Pending").length;
-  // Manager decision on a request (demo approvals screen).
-  function review(id, status, note) {
+  const pendingCount = () => (BE ? state.pending.length : state.requests.filter((r) => r.status === "Pending").length);
+  const recalcLeave = () => { if (BE) state.leave.used = BE.leaveUsed(state.requests, today().slice(0, 4)); };
+  // Manager decision on a request (approvals screen).
+  async function review(id, status, note) {
+    if (BE) {
+      try { await BE.review(id, status, note); } catch (ex) { fail(ex); }
+      try { state.pending = await BE.loadPending(); } catch { state.pending = state.pending.filter((r) => r.id !== id); }
+      render();
+      return toast(`Request ${status.toLowerCase()}`);
+    }
     const r = state.requests.find((x) => x.id === id);
     if (!r || r.status !== "Pending") return;
     r.status = status;
@@ -889,9 +963,27 @@
       icon: ok ? "check" : "x", color: ok ? "green" : "red", go: "#/status" });
     save(); render(); toast(`Request ${status.toLowerCase()}`);
   }
-  function addRequest(r) {
-    state.requests.push({ id: state.nextId++, status: "Pending", created: Date.now(), ...r });
-    save();
+  // Submit a request; returns true on success. `form` supplies the optional attachment and submit button.
+  async function addRequest(r, form) {
+    if (!BE) {
+      state.requests.push({ id: state.nextId++, status: "Pending", created: Date.now(), ...r });
+      save();
+      return true;
+    }
+    const btn = form && form.querySelector('button[type="submit"]');
+    const file = form && form.querySelector('input[type="file"]')?.files[0];
+    if (file && file.size > 10 * 1048576) { toast("Attachments must be 10 MB or smaller"); return false; }
+    if (btn) btn.disabled = true;
+    try {
+      state.requests.unshift(await BE.addRequest(r, file));
+      recalcLeave();
+      return true;
+    } catch (ex) {
+      fail(ex);
+      return false;
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   }
   function bindFileLabel(form) {
     const input = form.querySelector('input[type="file"]');
@@ -907,8 +999,8 @@
       <style>body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;color:#16223b}h1{color:#1a6bf0;margin:0}table{width:100%;border-collapse:collapse;margin-top:12px}td{padding:8px 0;border-bottom:1px solid #e6ebf3}td:last-child{text-align:right}.t td{font-weight:800;border:0;font-size:18px}</style></head>
       <body><h1>MyWork</h1><p>Payslip – <b>${monthLabel(slipMonth)}</b></p>
       <p>${esc(u.name)} · ${esc(u.role)} · ${esc(u.id)}<br/>${esc(u.dept)}</p>
-      <table>${p.earn.map(([k, v]) => `<tr><td>${k}</td><td>${idr(v)}</td></tr>`).join("")}
-      ${p.ded.map(([k, v]) => `<tr><td>${k}</td><td>-${idr(v)}</td></tr>`).join("")}
+      <table>${p.earn.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${idr(v)}</td></tr>`).join("")}
+      ${p.ded.map(([k, v]) => `<tr><td>${esc(k)}</td><td>-${idr(v)}</td></tr>`).join("")}
       <tr class="t"><td>Net Salary</td><td>${idr(p.net)}</td></tr></table>
       <script>window.onload=()=>window.print()<\/script></body></html>`);
     w.document.close();
@@ -918,17 +1010,46 @@
     start() { state.onboarded = true; save(); go("#/login"); },
     nextSlide() { slide = Math.min(SLIDES.length - 1, slide + 1); render(); },
     slideTo(el) { slide = Number(el.dataset.i); render(); },
-    logout() { state.auth.loggedIn = false; save(); closeSheet(); go("#/login"); toast("You have logged out"); },
+    async logout() {
+      if (BE) {
+        state.auth.loggedIn = false; // so the signed-out listener stays quiet
+        await BE.signOut().catch(() => {});
+        const onboarded = state.onboarded;
+        state = emptyState();
+        state.onboarded = onboarded;
+      }
+      state.auth.loggedIn = false; save(); closeSheet(); go("#/login"); toast("You have logged out");
+    },
     forgot() {
+      if (BE) {
+        const typed = ($("#login-id") || {}).value || "";
+        return sheet(`<div class="bold" style="font-size:16px">Reset your password</div>
+          <p class="small muted" style="margin:8px 0 14px;line-height:1.5">We'll email you a link to set a new password.</p>
+          <form id="reset-form" novalidate><div class="field"><label for="reset-email">Work Email</label>
+            <input class="input" id="reset-email" type="email" name="email" value="${esc(typed)}" autocomplete="username"/></div>
+          <button class="btn" type="submit">Send Reset Link</button></form>`, (sh) => {
+          $("#reset-form", sh).onsubmit = async (e) => {
+            e.preventDefault();
+            const email = e.target.email.value.trim();
+            if (!/^\S+@\S+\.\S+$/.test(email)) return toast("Enter a valid email address");
+            try { await BE.resetPassword(email); } catch (ex) { return fail(ex); }
+            closeSheet(); toast("Check your email for the reset link");
+          };
+        });
+      }
       sheet(`<div class="bold" style="font-size:16px">Forgot your password?</div>
         <p class="small muted" style="margin:8px 0 18px;line-height:1.5">Contact HR at <b>hr@company.co.id</b> to reset your password. In this demo you can restore the default password instead.</p>
         <button class="btn" id="reset-pw">Reset to demo password</button><button class="btn ghost" data-close style="margin-top:10px">Cancel</button>`,
         (s) => { $("#reset-pw", s).onclick = () => { state.auth.hash = DEFAULT_HASH; save(); closeSheet(); toast("Password reset to password123"); }; });
     },
-    readAll() { state.notifications.forEach((n) => { n.read = true; }); save(); render(); },
+    readAll() {
+      state.notifications.forEach((n) => { n.read = true; }); save(); render();
+      if (BE) BE.markRead(null).catch(fail);
+    },
     openNotif(el) {
       const n = state.notifications.find((x) => x.id === Number(el.dataset.id));
       if (!n) return;
+      if (BE && !n.read) BE.markRead(n.id).catch(fail);
       n.read = true; save();
       go(n.go || "#/notifikasi");
     },
@@ -948,17 +1069,26 @@
       sheet(`<div class="bold" style="margin-bottom:14px">More</div>
         <button class="list-item" data-close data-go="#/aktivitas">${ic("activity", 20, "var(--primary)")}<span class="grow">My Activity</span>${ic("chevR", 18)}</button>
         <button class="list-item" data-close data-go="#/reimburse">${ic("receipt", 20, "var(--green)")}<span class="grow">Reimbursement Request</span>${ic("chevR", 18)}</button>
-        <button class="list-item" data-close data-go="#/approvals">${ic("clipboard", 20, "var(--purple)")}<span class="grow">Approvals (demo)</span>${pendingCount() ? `<span class="badge orange">${pendingCount()}</span>` : ""}${ic("chevR", 18)}</button>
-        <button class="list-item" data-close data-action="resetDemo">${ic("history", 20, "var(--orange)")}<span class="grow">Reset Demo Data</span>${ic("chevR", 18)}</button>
+        ${BE && !state.isManager ? "" : `<button class="list-item" data-close data-go="#/approvals">${ic("clipboard", 20, "var(--purple)")}<span class="grow">${BE ? "Approvals" : "Approvals (demo)"}</span>${pendingCount() ? `<span class="badge orange">${pendingCount()}</span>` : ""}${ic("chevR", 18)}</button>`}
+        ${BE ? "" : `<button class="list-item" data-close data-action="resetDemo">${ic("history", 20, "var(--orange)")}<span class="grow">Reset Demo Data</span>${ic("chevR", 18)}</button>`}
         <button class="list-item" data-close data-go="#/bye">${ic("logout", 20, "var(--red)")}<span class="grow">Log Out</span>${ic("chevR", 18)}</button>`);
     },
     resetDemo() { state = seed(); state.onboarded = true; state.auth.loggedIn = true; save(); render(); toast("Demo data restored"); },
-    checkin() {
-      state.attendance.in = Date.now(); save(); render(); toast(`Checked in at ${hm(state.attendance.in)}`);
+    async checkin(el) {
+      if (BE) {
+        el.disabled = true;
+        try { state.attendance = await BE.checkIn(today(), state.attendance.location || "Head Office"); } catch (ex) { el.disabled = false; return fail(ex); }
+      } else state.attendance.in = Date.now();
+      save(); render(); toast(`Checked in at ${hm(state.attendance.in)}`);
     },
     checkout() {
       const worked = Date.now() - state.attendance.in;
-      const confirmOut = () => { state.attendance.out = Date.now(); save(); closeSheet(); render(); toast(`Checked out at ${hm(state.attendance.out)}`); };
+      const confirmOut = async () => {
+        if (BE) {
+          try { state.attendance = await BE.checkOut(state.attendance.rowId); } catch (ex) { return fail(ex); }
+        } else state.attendance.out = Date.now();
+        save(); closeSheet(); render(); toast(`Checked out at ${hm(state.attendance.out)}`);
+      };
       if (worked < 8 * 3600000) {
         sheet(`<div class="bold" style="font-size:16px">Check out now?</div>
           <p class="small muted" style="margin:8px 0 18px">You have only worked ${Math.floor(worked / 3600000)} hours ${Math.floor(worked / 60000) % 60} minutes (less than 8 hours).</p>
@@ -986,22 +1116,41 @@
         ${r.category ? `<div class="info-row"><div class="grow xs muted">Category</div><div class="small bold">${esc(r.category)}</div></div>` : ""}
         <div class="info-row"><div class="grow xs muted">Description</div><div class="small bold" style="text-align:right;max-width:65%">${esc(r.note)}</div></div>
         ${r.reviewNote ? `<div class="info-row"><div class="grow xs muted">Manager note</div><div class="small bold" style="text-align:right;max-width:65%">${esc(r.reviewNote)}</div></div>` : ""}
+        ${r.attachment ? `<button class="list-item" style="margin-top:14px" data-action="openAttachment" data-path="${esc(r.attachment)}">${ic("file", 20, "var(--muted)")}<span class="grow">View attachment</span>${ic("chevR", 18)}</button>` : ""}
         ${r.status === "Pending" ? `<button class="btn danger" id="cancel-req" style="margin-top:16px">Cancel Request</button>` : ""}`,
         (s) => {
           const b = $("#cancel-req", s);
-          if (b) b.onclick = () => {
-            if (r.type === "cuti" && r.title === "Annual Leave") state.leave.used -= daysBetween(r.from, r.to);
-            state.requests = state.requests.filter((x) => x.id !== r.id);
+          if (b) b.onclick = async () => {
+            if (BE) {
+              b.disabled = true;
+              try { await BE.cancelRequest(r.id); } catch (ex) { b.disabled = false; return fail(ex); }
+              state.requests = state.requests.filter((x) => x.id !== r.id);
+              recalcLeave();
+            } else {
+              if (r.type === "cuti" && r.title === "Annual Leave") state.leave.used -= daysBetween(r.from, r.to);
+              state.requests = state.requests.filter((x) => x.id !== r.id);
+            }
             save(); closeSheet(); render(); toast("Request cancelled");
           };
         });
+    },
+    async openAttachment(el) {
+      if (!BE) return toast("Attachments are only stored when connected to the server");
+      try {
+        const url = await BE.attachmentUrl(el.dataset.path);
+        sheet(`<div class="bold" style="margin-bottom:12px">Attachment</div>
+          <p class="small muted" style="margin-bottom:16px">The link works for 5 minutes.</p>
+          <a class="btn" href="${esc(url)}" target="_blank" rel="noopener">${ic("eye", 18)} Open attachment</a>`);
+      } catch (ex) { fail(ex); }
     },
     toggleSalary() { showSalary = !showSalary; render(); },
     slipDetail() { sheet(`<div class="bold" style="margin-bottom:4px">Salary Details</div><div class="xs muted">${monthLabel(slipMonth)}</div>${slipTable(payslip(slipMonth))}`); },
     slipDownload: printSlip,
     slipHistory() {
       const now = new Date();
-      const months = Array.from({ length: 6 }, (_, i) => { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; });
+      const months = BE ? Object.keys(state.payslips).sort().reverse().slice(0, 24)
+        : Array.from({ length: 6 }, (_, i) => { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; });
+      if (!months.length) return toast("No payslips yet");
       sheet(`<div class="bold" style="margin-bottom:12px">Payslip History</div>
         ${months.map((ym) => `<button class="list-item" data-close data-action="pickSlip" data-ym="${ym}"><span class="grow">${monthLabel(ym)}</span><span class="small bold">${idr(payslip(ym).net)}</span>${ic("chevR", 18)}</button>`).join("")}`);
     },
@@ -1037,10 +1186,14 @@
           e.preventDefault();
           const f = e.target;
           if (!f.old.value) return toast("Enter your current password");
-          if ((await sha256(f.old.value)) !== state.auth.hash) return toast("Current password is incorrect");
+          if (!BE && (await sha256(f.old.value)) !== state.auth.hash) return toast("Current password is incorrect");
           if (f.n1.value.length < 8) return toast("Password must be at least 8 characters");
           if (f.n1.value !== f.n2.value) return toast("Passwords do not match");
           if (f.n1.value === f.old.value) return toast("New password must be different");
+          if (BE) {
+            try { await BE.changePassword(state.user.email, f.old.value, f.n1.value); } catch (ex) { return fail(ex); }
+            closeSheet(); return toast("Password changed");
+          }
           state.auth.hash = await sha256(f.n1.value);
           notify({ title: "Password changed", body: "Your account password was changed. If this wasn't you, contact IT.", icon: "lock", color: "purple", go: "#/profil" });
           save(); closeSheet(); toast("Password changed");
@@ -1051,16 +1204,19 @@
       const u = state.user;
       sheet(`<div class="bold" style="margin-bottom:14px">Edit Profile</div>
         <form id="profile-form" novalidate>
-          <div class="field"><label>Email</label><input class="input" type="email" name="email" value="${esc(u.email)}"/></div>
+          <div class="field"><label>Email</label><input class="input" type="email" name="email" value="${esc(u.email)}" ${BE ? 'readonly title="Your sign-in email is managed by HR"' : ""}/></div>
           <div class="field"><label>Phone</label><input class="input" type="tel" name="phone" value="${esc(u.phone)}"/></div>
           <div class="field"><label>Address</label><input class="input" name="address" value="${esc(u.address)}"/></div>
           <button class="btn" type="submit">Save Changes</button></form>`, (s) => {
-        $("#profile-form", s).onsubmit = (e) => {
+        $("#profile-form", s).onsubmit = async (e) => {
           e.preventDefault();
           const f = e.target;
           if (!/^\S+@\S+\.\S+$/.test(f.email.value)) return toast("Invalid email format");
           if (f.phone.value.replace(/\D/g, "").length < 9) return toast("Invalid phone number");
           if (!f.address.value.trim()) return toast("Please enter an address");
+          if (BE) {
+            try { await BE.updateProfile({ phone: f.phone.value.trim(), address: f.address.value.trim() }); } catch (ex) { return fail(ex); }
+          }
           Object.assign(state.user, { email: f.email.value.trim(), phone: f.phone.value.trim(), address: f.address.value.trim() });
           save(); closeSheet(); render(); toast("Profile updated");
         };
@@ -1074,15 +1230,37 @@
         <button class="list-item" data-close data-action="docDownload" data-id="${d.id}">${ic("download", 20, "var(--muted)")}<span class="grow">Download</span></button>
         <button class="list-item" data-action="docDelete" data-id="${d.id}" style="color:var(--red)">${ic("trash", 20)}<span class="grow">Delete</span></button>`);
     },
-    docView(el) {
+    async docView(el) {
       const d = state.docs.find((x) => x.id === Number(el.dataset.id));
+      if (BE) {
+        try {
+          const url = await BE.docUrl(d, false);
+          const isImg = /\.(png|jpe?g|gif|webp)$/i.test(d.file);
+          return sheet(`<div class="bold" style="margin-bottom:12px">${esc(d.name)}</div>
+            ${isImg ? `<img src="${esc(url)}" alt="${esc(d.name)}" style="width:100%;border-radius:12px;margin-bottom:14px"/>` : ""}
+            <a class="btn" href="${esc(url)}" target="_blank" rel="noopener">${ic("eye", 18)} Open ${esc(d.file)}</a>
+            <p class="xs muted" style="text-align:center;margin-top:10px">The link works for 5 minutes.</p>`);
+        } catch (ex) { return fail(ex); }
+      }
       sheet(`<div class="bold" style="margin-bottom:12px">${esc(d.name)}</div>
         <div style="aspect-ratio:3/4;border-radius:12px;background:${COLOR[d.kind][0]};display:grid;place-items:center">${ic("file", 64, COLOR[d.kind][1], 1.4)}</div>
         <div class="xs muted" style="text-align:center;margin-top:10px">Preview of ${esc(d.file)}</div>`);
     },
-    docDownload(el) { const d = state.docs.find((x) => x.id === Number(el.dataset.id)); toast(`Downloading ${d.file}…`); },
-    docDelete(el) {
+    async docDownload(el) {
+      const d = state.docs.find((x) => x.id === Number(el.dataset.id));
+      if (!BE) return toast(`Downloading ${d.file}…`);
+      try {
+        const url = await BE.docUrl(d, true);
+        sheet(`<div class="bold" style="margin-bottom:12px">Download ${esc(d.file)}</div>
+          <a class="btn" href="${esc(url)}" rel="noopener">${ic("download", 18)} Download</a>
+          <p class="xs muted" style="text-align:center;margin-top:10px">The link works for 5 minutes.</p>`);
+      } catch (ex) { fail(ex); }
+    },
+    async docDelete(el) {
       const id = Number(el.dataset.id);
+      if (BE) {
+        try { await BE.deleteDoc(state.docs.find((x) => x.id === id)); } catch (ex) { return fail(ex); }
+      }
       state.docs = state.docs.filter((x) => x.id !== id);
       save(); closeSheet(); render(); toast("Document deleted");
     },
@@ -1145,6 +1323,57 @@
   const tickClock = () => { const d = new Date(); $("#clock").textContent = `${d.getHours()}:${pad(d.getMinutes())}`; };
   tickClock(); setInterval(tickClock, 15000);
 
+  // Backend mode: load the signed-in user's data from Supabase into `state`.
+  async function hydrate() {
+    Object.assign(state, await BE.load(today()));
+    state.auth.loggedIn = true;
+    if (state.announcements) ANNOUNCEMENTS = state.announcements;
+  }
+  // Screens without forms can be refreshed in place when the app comes back into view.
+  const REFRESHABLE = ["home", "status", "notifikasi", "approvals", "aktivitas", "riwayat", "pengumuman", "absensi", "dokumen", "slip-gaji", "jadwal"];
+
   navStack.push(location.hash || "#/home");
-  render();
+  if (BE) {
+    $("#app").innerHTML = `<div class="empty" style="padding-top:45%">${ic("clock", 28, "var(--primary)")}<br/><br/>Loading your workspace…</div>`;
+    (async () => {
+      try {
+        if (await BE.hasSession()) await hydrate();
+      } catch (ex) {
+        state.auth.loggedIn = false;
+        fail(ex);
+      }
+      render();
+    })();
+    BE.onSignedOut(() => {
+      if (!state.auth.loggedIn) return;
+      state = { ...emptyState(), onboarded: state.onboarded };
+      render();
+      toast("You have been signed out");
+    });
+    // Opened from a password-reset email: ask for the new password.
+    BE.onRecovery(() => {
+      sheet(`<div class="bold" style="font-size:16px;margin-bottom:12px">Choose a new password</div>
+        <form id="recover-form" novalidate>
+          <div class="field"><label for="rec-1">New Password</label><input class="input" id="rec-1" type="password" name="n1" autocomplete="new-password"/></div>
+          <div class="field"><label for="rec-2">Confirm New Password</label><input class="input" id="rec-2" type="password" name="n2" autocomplete="new-password"/></div>
+          <button class="btn" type="submit">Save Password</button></form>`, (sh) => {
+        $("#recover-form", sh).onsubmit = async (e) => {
+          e.preventDefault();
+          const f = e.target;
+          if (f.n1.value.length < 8) return toast("Password must be at least 8 characters");
+          if (f.n1.value !== f.n2.value) return toast("Passwords do not match");
+          try { await BE.setPassword(f.n1.value); await hydrate(); } catch (ex) { return fail(ex); }
+          closeSheet(); history.replaceState(null, "", location.pathname + "#/home"); render(); toast("Password updated");
+        };
+      });
+    });
+    document.addEventListener("visibilitychange", async () => {
+      if (document.visibilityState !== "visible" || !state.auth.loggedIn || !REFRESHABLE.includes(route()) || $(".sheet-back")) return;
+      try { await hydrate(); render(); } catch { /* keep showing what we have */ }
+    });
+  } else if (window.MyWorkBackendError) {
+    $("#app").innerHTML = `<div class="empty" style="padding:45% 24px 0">${ic("info", 28, "var(--red)")}<br/><br/>${esc(window.MyWorkBackendError)}</div>`;
+  } else {
+    render();
+  }
 })();
