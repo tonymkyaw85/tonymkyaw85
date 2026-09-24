@@ -1,0 +1,5 @@
+# Only index.php and admin.php are meant to be opened directly.
+<FilesMatch "^(config|config\.sample|lib)\.php$">
+  Require all denied
+</FilesMatch>
+Options -Indexes

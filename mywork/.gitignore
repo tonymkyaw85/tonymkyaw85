@@ -1,0 +1,5 @@
+# Server secrets and uploaded files stay on the NAS only
+api/config.php
+api/storage/*
+!api/storage/.htaccess
+!api/storage/index.html

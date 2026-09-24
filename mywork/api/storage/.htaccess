@@ -1,0 +1,2 @@
+# Uploaded files are only served through the API (index.php?a=file), never directly.
+Require all denied
