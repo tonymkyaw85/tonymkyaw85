@@ -701,7 +701,7 @@
       html: `
       ${header("Request Status")}
       <div class="fade-in">
-        <div class="chips">${STATUS_TABS.map(([l], i) => `<button class="chip ${i === statusTab ? "active" : ""}" data-action="statusTab" data-i="${i}">${l}</button>`).join("")}</div>
+        <div class="chips">${STATUS_TABS.map(([l, type], i) => BE && BE.odoo && (type === "izin" || type === "lembur") ? "" : `<button class="chip ${i === statusTab ? "active" : ""}" data-action="statusTab" data-i="${i}">${l}</button>`).join("")}</div>
         ${list.length ? list.map((r) => {
           const m = TYPE_META[r.type];
           return `<button class="status-item" style="width:100%;text-align:left" data-action="request" data-id="${r.id}">
@@ -1036,7 +1036,9 @@
     if (file && file.size > 10 * 1048576) { toast("Attachments must be 10 MB or smaller"); return false; }
     if (btn) btn.disabled = true;
     try {
-      state.requests.unshift(await BE.addRequest(r, file));
+      // Await first: a background refresh may replace state.requests while the request is sent.
+      const created = await BE.addRequest(r, file);
+      state.requests.unshift(created);
       recalcLeave();
       return true;
     } catch (ex) {
@@ -1385,8 +1387,13 @@
   tickClock(); setInterval(tickClock, 15000);
 
   // Backend mode: load the signed-in user's data from Supabase into `state`.
+  // Several refreshes can overlap (e.g. one per submitted request); only the newest may update the screen.
+  let hydrateSeq = 0;
   async function hydrate() {
-    Object.assign(state, await BE.load(today()));
+    const seq = ++hydrateSeq;
+    const data = await BE.load(today());
+    if (seq !== hydrateSeq) return;
+    Object.assign(state, data);
     state.auth.loggedIn = true;
     if (state.announcements) ANNOUNCEMENTS = state.announcements;
   }

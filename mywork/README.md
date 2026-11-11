@@ -56,16 +56,31 @@ On desktop the app shows inside a phone frame. On a phone it fills the screen.
 
 1. **Integration user.** In Odoo create a user such as "MyWork Integration" with:
    - Allowed companies: **EDPN TECHNOLOGIES PTE. LTD.** only.
-   - Access rights: Employees **Officer**, Attendances **Officer**, Time Off **Officer**,
-     Expenses **Team Approver**, Payroll **Assistant** (to read payslips).
+   - Access rights: Attendances **Officer: Manage all attendances**, Time Off **Officer: Manage all
+     requests**, Expenses **All Approver**, Payroll **Assistant** (to read payslips).
+   - You can also use an existing user (EDPN uses `finance_clerk`); it needs the same rights. Everything the
+     app saves shows in Odoo as done by this user, with a note naming the manager for approvals.
 2. **API key** for that user: Preferences → Account Security → New API Key. Odoo limits keys to
    **3 months**, so renew it before it expires and update `ODOO_API_KEY` on the server.
 3. **One work email per person.** Each employee signs in with the work email on their Odoo employee
    record, so every work email must be unique within EDPN SG.
 4. **Time off.** Allocate Annual Leave and Sick Time Off to employees in Odoo; types that need an
-   allocation are hidden in the app until the employee has days allocated.
+   allocation are hidden in the app until the employee has days allocated. Each type's **Approval**
+   setting decides the flow: types that need approval (e.g. Sick Time Off, "By Employee's Approver")
+   wait for the manager's decision in MyWork; types set to no approval are approved immediately.
 5. **Public holidays.** Add Singapore public holidays in Odoo (Time Off → Configuration → Public
    Holidays) so they appear in the app's schedule.
+
+### How requests flow (managers decide in MyWork)
+
+| | Employee submits | Manager approves in MyWork | Manager refuses |
+|---|---|---|---|
+| Time off (type needs approval) | Odoo: **To Approve** | Odoo: **Approved** + note with manager's name | Odoo: **Refused** + note |
+| Time off (type without approval) | Odoo: **Approved** at once | — | — |
+| Expense | Odoo: **Draft** with receipt (app shows Pending) | Odoo: submitted and **Approved** + note; finance pays as usual | Odoo: **Refused** with the reason |
+
+Employees can withdraw a request until it's decided. Managers get an in-app notification for new
+requests once they have opened MyWork at least once; the Approvals screen always lists what's waiting.
 
 ## Install the Odoo function on your Supabase server
 

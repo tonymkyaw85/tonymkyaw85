@@ -48,7 +48,8 @@ const LEAVE_STATUS: Record<string, string> = {
   confirm: "Pending", validate1: "Pending", validate: "Approved", refuse: "Rejected", cancel: "Cancelled",
 };
 const EXPENSE_STATUS: Record<string, string> = {
-  draft: "Draft", submitted: "Pending", approved: "Approved", posted: "Approved", in_payment: "Approved", paid: "Paid", refused: "Rejected",
+  // Claims from the app stay in draft until the manager approves them in MyWork (see review()).
+  draft: "Pending", submitted: "Pending", approved: "Approved", posted: "Approved", in_payment: "Approved", paid: "Paid", refused: "Rejected",
 };
 
 function mapLeave(l: any) {
@@ -117,7 +118,7 @@ export async function load(call: Call, s: Settings, me: Employee) {
       ? call<any[]>("hr.leave", "search_read", { domain: [["employee_id", "in", reportIds], ["state", "in", ["confirm", "validate1"]]], fields: LEAVE_FIELDS, order: "create_date" })
       : Promise.resolve([]),
     reportIds.length
-      ? call<any[]>("hr.expense", "search_read", { domain: [["employee_id", "in", reportIds], ["state", "=", "submitted"]], fields: EXPENSE_FIELDS, order: "create_date" })
+      ? call<any[]>("hr.expense", "search_read", { domain: [["employee_id", "in", reportIds], ["state", "in", ["draft", "submitted"]]], fields: EXPENSE_FIELDS, order: "create_date" })
       : Promise.resolve([]),
     call<any[]>("res.company", "search_read", { domain: [["id", "=", s.companyId]], fields: ["currency_id"] }),
   ]);
@@ -161,14 +162,17 @@ export async function load(call: Call, s: Settings, me: Employee) {
 async function leaveTypesFor(call: Call, s: Settings, me: Employee) {
   const types = await call<any[]>("hr.work.entry.type", "search_read", {
     domain: [["time_off_selectable", "=", true], ["country_code", "in", ["SG", false]]],
-    fields: ["name", "requires_allocation", "request_unit", "max_leaves", "virtual_remaining_leaves", "leaves_taken"],
+    fields: ["name", "requires_allocation", "request_unit", "max_leaves", "virtual_remaining_leaves", "leaves_taken", "leave_validation_type"],
     context: { employee_id: me.id },
     order: "name",
   });
   return types
     // Types that need an allocation are only useful if HR allocated some days.
     .filter((t) => !t.requires_allocation || t.max_leaves > 0)
-    .map((t) => ({ id: t.id, name: t.name, unit: t.request_unit, limited: t.requires_allocation, max: t.max_leaves, remaining: t.virtual_remaining_leaves }));
+    .map((t) => ({
+      id: t.id, name: t.name, unit: t.request_unit, limited: t.requires_allocation, max: t.max_leaves, remaining: t.virtual_remaining_leaves,
+      needsApproval: ["manager", "hr", "both"].includes(t.leave_validation_type),
+    }));
 }
 
 async function payslipsFor(call: Call, me: Employee) {
@@ -233,10 +237,15 @@ async function attach(call: Call, model: string, resId: number, file?: Upload) {
 
 export async function requestLeave(call: Call, s: Settings, me: Employee, p: { typeId: number; from: string; to: string; note: string; file?: Upload }) {
   const allowed = await leaveTypesFor(call, s, me);
-  if (!allowed.some((t) => t.id === p.typeId)) throw new UserError("This type of time off isn't available to you.");
+  const type = allowed.find((t) => t.id === p.typeId);
+  if (!type) throw new UserError("This type of time off isn't available to you.");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(p.from) || !/^\d{4}-\d{2}-\d{2}$/.test(p.to) || p.to < p.from) throw new UserError("Check the dates and try again.");
   const [id] = await call<number[]>("hr.leave", "create", {
     vals_list: [{ employee_id: me.id, work_entry_type_id: p.typeId, request_date_from: p.from, request_date_to: p.to, name: p.note.slice(0, 500) }],
+    // The integration user is a Time Off Officer, so Odoo would approve the request as soon as it
+    // is created. For types that need approval, leave_fast_create keeps it waiting ("To Approve")
+    // for the manager's decision in MyWork. Types set to "No validation" are approved by Odoo as usual.
+    ...(type.needsApproval ? { context: { leave_fast_create: true } } : {}),
   });
   await attach(call, "hr.leave", id, p.file);
   const [row] = await call<any[]>("hr.leave", "read", { ids: [id], fields: LEAVE_FIELDS });
@@ -256,8 +265,9 @@ export async function submitExpense(call: Call, s: Settings, me: Employee, p: { 
       total_amount_currency: p.amount, quantity: 1, payment_mode: "own_account",
     }],
   });
+  // Not submitted in Odoo yet: Odoo would make the integration user the approver and
+  // approve it on the spot. The manager's decision in MyWork submits (approves) or refuses it.
   await attach(call, "hr.expense", id, p.file);
-  await call("hr.expense", "action_submit", { ids: [id] });
   const [row] = await call<any[]>("hr.expense", "read", { ids: [id], fields: EXPENSE_FIELDS });
   return mapExpense(row);
 }
@@ -269,10 +279,13 @@ export async function cancelRequest(call: Call, me: Employee, requestId: string)
   if (kind === "leave") {
     const rows = await call<any[]>("hr.leave", "search_read", { domain: [["id", "=", id], ["employee_id", "=", me.id], ["state", "in", ["confirm", "validate1"]]], fields: ["id"] });
     if (!rows.length) throw new UserError("This request can no longer be cancelled.", 409);
-    await call("hr.leave", "action_cancel", { ids: [id] });
+    // Nobody has decided yet, so the request is simply withdrawn (deleted) in Odoo.
+    await call("hr.leave", "unlink", { ids: [id] });
   } else if (kind === "exp") {
     const rows = await call<any[]>("hr.expense", "search_read", { domain: [["id", "=", id], ["employee_id", "=", me.id], ["state", "in", ["draft", "submitted"]]], fields: ["id"] });
     if (!rows.length) throw new UserError("This request can no longer be cancelled.", 409);
+    const [cur] = await call<any[]>("hr.expense", "read", { ids: [id], fields: ["state"] });
+    if (cur.state === "submitted") await call("hr.expense", "action_reset", { ids: [id] });
     await call("hr.expense", "unlink", { ids: [id] });
   } else throw new UserError("Unknown request.");
 }
@@ -283,7 +296,7 @@ export async function review(call: Call, s: Settings, me: Employee, requestId: s
   const id = Number(raw);
   const model = kind === "leave" ? "hr.leave" : kind === "exp" ? "hr.expense" : "";
   if (!model) throw new UserError("Unknown request.");
-  const pendingStates = kind === "leave" ? ["confirm", "validate1"] : ["submitted"];
+  const pendingStates = kind === "leave" ? ["confirm", "validate1"] : ["draft", "submitted"];
   const [row] = await call<any[]>(model, "search_read", {
     domain: [["id", "=", id], ["state", "in", pendingStates], ["employee_id.parent_id", "=", me.id], ["employee_id.company_id", "=", s.companyId]],
     fields: kind === "leave" ? LEAVE_FIELDS : EXPENSE_FIELDS,
@@ -304,7 +317,17 @@ export async function review(call: Call, s: Settings, me: Employee, requestId: s
       await call("hr.leave", "action_refuse", { ids: [id] });
     }
   } else {
-    await call("hr.expense", approve ? "action_approve" : "action_refuse", approve ? { ids: [id] } : { ids: [id], reason: reason || "Refused in MyWork" });
+    if (approve) {
+      if (row.state === "draft") await call("hr.expense", "action_submit", { ids: [id] });
+      const [cur] = await call<any[]>("hr.expense", "read", { ids: [id], fields: ["state"] });
+      if (cur.state === "submitted") await call("hr.expense", "action_approve", { ids: [id] });
+    } else {
+      // Odoo refuses through its "Refuse Expense" wizard, which carries the reason.
+      const [w] = await call<number[]>("hr.expense.refuse.wizard", "create", {
+        vals_list: [{ reason: reason || `Refused in MyWork by ${me.name}`, expense_ids: [[6, 0, [id]]] }],
+      });
+      await call("hr.expense.refuse.wizard", "action_refuse", { ids: [w] });
+    }
   }
   const [after] = await call<any[]>(model, "read", { ids: [id], fields: kind === "leave" ? LEAVE_FIELDS : EXPENSE_FIELDS });
   return { request: kind === "leave" ? mapLeave(after) : mapExpense(after), employeeEmail: await workEmailOf(call, m2oId(row.employee_id)!) };
