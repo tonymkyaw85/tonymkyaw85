@@ -70,7 +70,12 @@
   })());
   const hm = (ts) => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
   const hms = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  const idr = (n) => "Rp " + Math.round(n).toLocaleString("en-US");
+  const CURRENCY_PREFIX = { IDR: "Rp ", SGD: "S$ ", MYR: "RM ", USD: "$", VND: "₫" };
+  const idr = (n) => {
+    const cur = (typeof state !== "undefined" && state.currency) || "IDR";
+    const decimals = cur === "IDR" || cur === "VND" ? 0 : 2;
+    return (CURRENCY_PREFIX[cur] ?? cur + " ") + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  };
   const fileSize = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB");
   const daysBetween = (a, b) => Math.round((parseIso(b) - parseIso(a)) / 86400000) + 1;
   const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -233,7 +238,7 @@
     lembur: { icon: "timer", bg: "var(--red-soft)", fg: "var(--red)" },
     reimburse: { icon: "receipt", bg: "var(--green-soft)", fg: "var(--green)" },
   };
-  const STATUS_BADGE = { Approved: "green", Pending: "orange", Rejected: "red" };
+  const STATUS_BADGE = { Approved: "green", Paid: "green", Pending: "orange", Draft: "blue", Rejected: "red", Cancelled: "blue" };
   const COLOR = {
     blue: ["var(--primary-soft)", "var(--primary)"], red: ["var(--red-soft)", "var(--red)"],
     green: ["var(--green-soft)", "var(--green)"], orange: ["var(--orange-soft)", "var(--orange)"],
@@ -454,7 +459,7 @@
           <h3>Have a great day!</h3><p>${greeting}. Stay motivated and be your best self today.</p>
         </div>
         <div class="menu-grid">
-          ${MENU.map(([label, icon, color, go]) => `
+          ${MENU.filter(([, , , go]) => !(BE && BE.odoo && (go === "#/izin" || go === "#/lembur"))).map(([label, icon, color, go]) => `
             <button class="menu-item" ${go === "more" ? 'data-action="more"' : `data-go="${go}"`}>
               <span class="menu-icon" style="background:${COLOR[color][0]}">${ic(icon, 24, COLOR[color][1])}</span>${label}
             </button>`).join("")}
@@ -465,7 +470,7 @@
           <div class="row" style="margin-top:14px">
             <div class="grow"><div class="xs muted">In</div><div class="bold">${a.in ? hm(a.in) : "--:--"}</div></div>
             <div class="grow"><div class="xs muted">Out</div><div class="bold">${a.out ? hm(a.out) : "--:--"}</div></div>
-            <div class="grow"><div class="xs muted">Location</div><div class="bold">${esc(a.location)}</div></div>
+            <div class="grow"><div class="xs muted">Location</div><div class="bold">${esc(a.location || state.user.address || "—")}</div></div>
           </div>
         </button>
       </div>`,
@@ -494,7 +499,7 @@
             <span class="check ${a.in ? "" : "off"}">${ic(a.in ? "check" : "clock", 20, "#fff", 3)}</span>
             <span class="bold small" style="color:${labelColor}">${label}</span>
             <span class="time" id="live-time">${hms(now)}</span>
-            <span class="xs muted">${a.in ? `Worked ${dur}` : esc(a.location)}</span>
+            <span class="xs muted">${a.in ? `Worked ${dur}` : esc(a.location || state.user.address || "")}</span>
           </div>
         </div>
         <div class="card stat-pair">
@@ -514,7 +519,51 @@
 
   const CUTI_TABS = ["Annual Leave", "Sick Leave", "Other Leave"];
   let cutiTab = 0;
-  screens.cuti = () => {
+  screens.cuti = () => (BE && BE.odoo ? odooLeaveScreen() : demoLeaveScreen());
+  function odooLeaveScreen() {
+    const types = state.leaveTypes || [];
+    const t = today();
+    if (!types.length) {
+      return { html: `${header("Leave Request")}<div class="empty">No time off types are available to you yet. Ask HR to set up your leave in Odoo.</div>` };
+    }
+    if (cutiTab >= types.length) cutiTab = 0;
+    const lt = types[cutiTab];
+    const unit = lt.unit === "hour" ? "hour" : "day";
+    return {
+      html: `
+      ${header("Leave Request")}
+      <div class="fade-in">
+        <div class="chips">${types.map((c, i) => `<button class="chip ${i === cutiTab ? "active" : ""}" data-action="cutiTab" data-i="${i}">${esc(c.name)}</button>`).join("")}</div>
+        <div class="balance"><div><div class="small bold" style="color:var(--primary)">${esc(lt.name)}</div>${lt.limited
+          ? `<div class="big">${plural(Math.max(0, Math.round(lt.remaining * 10) / 10), unit)}</div><div class="xs muted">left of ${plural(lt.max, unit)}</div>`
+          : `<div class="small muted" style="margin-top:6px;max-width:220px">No balance needed for this type. Your manager approves each request.</div>`}</div>${ic("palm", 54, "var(--green)", 1.6)}</div>
+        <form id="form-cuti" novalidate>
+          <div class="field"><label>Leave Dates</label>
+            <div class="date-range"><input class="input" type="date" name="from" value="${t}" required/><span class="muted">–</span><input class="input" type="date" name="to" value="${t}" required/></div></div>
+          <div class="field"><label for="alasan">Reason</label><textarea id="alasan" class="input" name="note" placeholder="e.g. Family matters" required></textarea></div>
+          <div class="field"><label>Attachment (Optional)</label>
+            <label class="input file-drop"><span data-filename>Choose File</span>${ic("upload", 18)}<input type="file" name="file" accept="image/*,.pdf"/></label></div>
+          <button class="btn" type="submit">Submit to Manager</button>
+        </form>
+      </div>`,
+      mount() {
+        const f = $("#form-cuti");
+        bindFileLabel(f);
+        f.from.addEventListener("change", () => { f.to.min = f.from.value; if (f.to.value < f.from.value) f.to.value = f.from.value; });
+        f.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          const from = f.from.value, to = f.to.value, note = f.note.value.trim();
+          if (!from || !to) return toast("Select your leave dates");
+          if (to < from) return toast("End date is invalid");
+          if (!note) return toast("Please enter a reason");
+          if (!(await addRequest({ type: "cuti", typeId: lt.id, title: lt.name, from, to, note }, f))) return;
+          toast(`${lt.name} request sent to your manager`);
+          go("#/status");
+        });
+      },
+    };
+  }
+  function demoLeaveScreen() {
     const left = state.leave.total - state.leave.used;
     const t = today();
     return {
@@ -597,9 +646,13 @@
     html: `
       ${header("Reimbursement Request")}
       <form id="form-reimb" class="fade-in" novalidate>
-        <div class="field"><label>Category</label><select class="input" name="category"><option>Transport</option><option>Meals</option><option>Health</option><option>Work Equipment</option><option>Other</option></select></div>
+        <div class="field"><label for="reimb-cat">Category</label><select class="input" id="reimb-cat" name="category">${BE && BE.odoo
+          ? `<option value="">Choose a category</option>` + (state.expenseCategories || []).map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")
+          : `<option>Transport</option><option>Meals</option><option>Health</option><option>Work Equipment</option><option>Other</option>`}</select></div>
         <div class="field"><label>Date</label><input class="input" type="date" name="date" value="${today()}" max="${today()}"/></div>
-        <div class="field"><label>Amount</label><input class="input" name="amount" inputmode="numeric" placeholder="Rp 0" value="Rp 150,000"/></div>
+        <div class="field"><label for="reimb-amt">Amount${BE && BE.odoo ? ` (${esc(state.currency || "")})` : ""}</label>${BE && BE.odoo
+          ? `<input class="input" id="reimb-amt" name="amount" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00"/>`
+          : `<input class="input" id="reimb-amt" name="amount" inputmode="numeric" placeholder="Rp 0" value="Rp 150,000"/>`}</div>
         <div class="field"><label>Description</label><input class="input" name="note" placeholder="e.g. Transport for client meeting"/></div>
         <div class="field"><label>Attachment</label><div id="reimb-att"></div>
           <label class="input file-drop" id="reimb-pick"><span>Upload receipt</span>${ic("upload", 18)}<input type="file" name="file" accept="image/*,.pdf"/></label></div>
@@ -608,7 +661,7 @@
     mount() {
       const f = $("#form-reimb");
       const amt = f.amount;
-      amt.addEventListener("input", () => {
+      if (!(BE && BE.odoo)) amt.addEventListener("input", () => {
         const n = Number(amt.value.replace(/\D/g, ""));
         amt.value = n ? idr(n) : "";
       });
@@ -624,12 +677,14 @@
       });
       f.addEventListener("submit", async (e) => {
         e.preventDefault();
-        const amount = Number(amt.value.replace(/\D/g, ""));
+        const amount = BE && BE.odoo ? Math.round(Number(amt.value) * 100) / 100 : Number(amt.value.replace(/\D/g, ""));
+        if (BE && BE.odoo && !f.category.value) return toast("Choose a category");
         if (!f.date.value) return toast("Select a date");
         if (!amount) return toast("Enter an amount");
         if (!f.note.value.trim()) return toast("Please enter a description");
         if (!f.file.files[0]) return toast("Attach a receipt");
-        if (!(await addRequest({ type: "reimburse", title: "Reimbursement", from: f.date.value, to: f.date.value, note: f.note.value.trim(), amount, category: f.category.value }, f))) return;
+        if (!(await addRequest({ type: "reimburse", title: "Reimbursement", from: f.date.value, to: f.date.value, note: f.note.value.trim(), amount,
+          category: BE && BE.odoo ? f.category.selectedOptions[0].textContent : f.category.value, productId: Number(f.category.value) }, f))) return;
         toast("Reimbursement submitted");
         go("#/status");
       });
@@ -692,7 +747,7 @@
           <input type="month" id="slip-month" value="${slipMonth}" max="${today().slice(0, 7)}" style="position:absolute;inset:0;opacity:0;cursor:pointer"/>
         </label>
         <div class="salary"><div class="small" style="opacity:.85">Total Net Salary</div>
-          <div class="amount">${!p ? "Not available" : showSalary ? idr(p.net) : "Rp ••••••••"}</div>
+          <div class="amount">${!p ? "Not available" : showSalary ? idr(p.net) : "••••••••"}</div>
           <button class="icon-btn" data-action="toggleSalary" aria-label="${showSalary ? "Hide" : "Show"} salary">${ic(showSalary ? "eye" : "eyeOff", 22, "#fff")}</button>
         </div>
         <div class="card row" style="margin-bottom:16px">${avatar(40)}
@@ -774,8 +829,9 @@
 
   screens.profil = () => {
     const u = state.user;
-    const rows = [["mail", "Email", u.email], ["phone", "Phone", u.phone], ["building", "Department", u.dept],
-      ["calendar", "Join Date", fmtDate(parseIso(u.joined))], ["pin", "Address", u.address]];
+    const rows = [["mail", "Email", u.email], ["phone", "Phone", u.phone || "—"], ["building", "Department", u.dept || "—"],
+      ...(BE && BE.odoo ? [["user", "Manager", u.manager || "—"], ["pin", "Work Location", u.address || "—"]]
+        : [["calendar", "Join Date", fmtDate(parseIso(u.joined))], ["pin", "Address", u.address]])];
     return {
       tab: "profil",
       html: `
@@ -787,7 +843,7 @@
         <div class="card" style="padding:4px 16px;margin-bottom:16px">
           ${rows.map(([i, k, v]) => `<div class="info-row">${ic(i, 18)}<div><div class="xs muted">${k}</div><div class="small bold" style="margin-top:2px">${esc(v)}</div></div></div>`).join("")}
         </div>
-        <button class="btn ghost" data-action="editProfile">Edit Profile</button>
+        ${BE && BE.profileReadOnly ? `<p class="xs muted" style="text-align:center">Your details come from Odoo. Ask HR to update them.</p>` : `<button class="btn ghost" data-action="editProfile">Edit Profile</button>`}
       </div>`,
     };
   };
@@ -944,8 +1000,12 @@
   });
 
   // ---------- Actions ----------
+  const reqId = (el) => (BE ? el.dataset.id : Number(el.dataset.id));
   const pendingCount = () => (BE ? state.pending.length : state.requests.filter((r) => r.status === "Pending").length);
-  const recalcLeave = () => { if (BE) state.leave.used = BE.leaveUsed(state.requests, today().slice(0, 4)); };
+  const recalcLeave = () => {
+    if (BE && BE.leaveUsed) state.leave.used = BE.leaveUsed(state.requests, today().slice(0, 4));
+    else if (BE) hydrate().then(render).catch(() => {});
+  };
   // Manager decision on a request (approvals screen).
   async function review(id, status, note) {
     if (BE) {
@@ -1054,9 +1114,9 @@
       n.read = true; save();
       go(n.go || "#/notifikasi");
     },
-    approve(el) { review(Number(el.dataset.id), "Approved"); },
+    approve(el) { review(reqId(el), "Approved"); },
     reject(el) {
-      const id = Number(el.dataset.id);
+      const id = reqId(el);
       sheet(`<div class="bold" style="font-size:16px;margin-bottom:12px">Reject request</div>
         <form id="reject-form"><div class="field"><label for="reject-note">Reason (optional)</label>
           <textarea class="input" id="reject-note" name="note" placeholder="e.g. Team is short-staffed that week"></textarea></div>
@@ -1078,7 +1138,7 @@
     async checkin(el) {
       if (BE) {
         el.disabled = true;
-        try { state.attendance = await BE.checkIn(today(), state.attendance.location || "Head Office"); } catch (ex) { el.disabled = false; return fail(ex); }
+        try { state.attendance = { ...state.attendance, ...(await BE.checkIn(today(), state.attendance.location || "Head Office")), date: today() }; } catch (ex) { el.disabled = false; return fail(ex); }
       } else state.attendance.in = Date.now();
       save(); render(); toast(`Checked in at ${hm(state.attendance.in)}`);
     },
@@ -1086,7 +1146,7 @@
       const worked = Date.now() - state.attendance.in;
       const confirmOut = async () => {
         if (BE) {
-          try { state.attendance = await BE.checkOut(state.attendance.rowId); } catch (ex) { return fail(ex); }
+          try { const r = await BE.checkOut(state.attendance.rowId); state.attendance = { ...state.attendance, in: r.in, out: r.out }; } catch (ex) { return fail(ex); }
         } else state.attendance.out = Date.now();
         save(); closeSheet(); render(); toast(`Checked out at ${hm(state.attendance.out)}`);
       };
@@ -1100,14 +1160,14 @@
     location() {
       sheet(`<div class="bold" style="margin-bottom:12px">My Location</div>
         <div style="height:150px;border-radius:14px;background:repeating-linear-gradient(45deg,#e8f0fe 0 12px,#f1f6ff 12px 24px);display:grid;place-items:center;margin-bottom:14px">${ic("pin", 40, "var(--red)")}</div>
-        <div class="bold small">Head Office</div><div class="xs muted" style="margin:2px 0 14px">Jl. Jend. Sudirman Kav. 52, South Jakarta · Check-in radius 100 m</div>
+        <div class="bold small">${esc(BE ? (state.user.address || "Office") : "Head Office")}</div><div class="xs muted" style="margin:2px 0 14px">${BE ? "Your work location in Odoo" : "Jl. Jend. Sudirman Kav. 52, South Jakarta · Check-in radius 100 m"}</div>
         <div class="badge green">You are within the office area</div>`);
     },
     cutiTab(el) { cutiTab = Number(el.dataset.i); render(); },
     statusTab(el) { statusTab = Number(el.dataset.i); render(); },
     annTab(el) { annTab = Number(el.dataset.i); render(); },
     request(el) {
-      const r = state.requests.find((x) => x.id === Number(el.dataset.id));
+      const r = state.requests.find((x) => x.id === reqId(el));
       if (!r) return;
       const m = TYPE_META[r.type];
       sheet(`<div class="row" style="margin-bottom:14px"><span class="circle-ic" style="background:${m.bg}">${ic(m.icon, 20, m.fg)}</span>
