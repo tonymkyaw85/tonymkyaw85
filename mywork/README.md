@@ -84,7 +84,21 @@ requests once they have opened MyWork at least once; the Approvals screen always
 
 ## Install the Odoo function on your Supabase server
 
-On the machine that runs Supabase (the `supabase/docker` folder of the self-hosted setup):
+**Easiest: the installer.** Sign in to the machine that runs Supabase (on a Synology NAS: enable SSH in
+Control Panel → Terminal & SNMP, then `ssh your-admin-user@nas-address`) and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tonymkyaw85/tonymkyaw85/claude/new-session-n30vcr/mywork/supabase/install-mywork-odoo.sh -o install-mywork-odoo.sh
+sudo bash install-mywork-odoo.sh
+```
+
+It finds the Supabase folder (or pass it: `sudo bash install-mywork-odoo.sh /volume1/docker/supabase/docker`),
+downloads the function, asks for the Odoo API key (hidden, and checked against Odoo before saving) and the
+app's web address, adds the settings to `.env` and `docker-compose.yml` (keeping `.bak-mywork-…` backups),
+restarts only the functions container and checks that the function answers. Run it again to update the
+function, change the app address or put in a renewed API key.
+
+**By hand**, on the machine that runs Supabase (the `supabase/docker` folder of the self-hosted setup):
 
 1. Copy this repository's `mywork/supabase/functions/mywork-odoo/` folder to
    `supabase/docker/volumes/functions/mywork-odoo/`.
