@@ -723,7 +723,7 @@
       if (!p) return null;
       const earn = p.earn.map(([k, v]) => [k, Number(v)]), ded = p.ded.map(([k, v]) => [k, Number(v)]);
       const gross = earn.reduce((s, e) => s + e[1], 0);
-      return { earn, ded, gross, net: gross - ded.reduce((s, d) => s + d[1], 0) };
+      return { earn, ded, gross, net: p.net != null ? Number(p.net) : gross - ded.reduce((s, d) => s + d[1], 0) };
     }
     const m = Number(ym.split("-")[1]);
     const lembur = [300000, 450000, 250000, 600000, 450000, 350000, 500000, 400000, 450000, 550000, 300000, 650000][m - 1];

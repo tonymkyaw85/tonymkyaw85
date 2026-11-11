@@ -176,18 +176,28 @@ async function payslipsFor(call: Call, me: Employee) {
     domain: [["employee_id", "=", me.id], ["state", "in", ["done", "paid"]]], fields: ["date_from", "line_ids"], order: "date_from desc", limit: 24,
   });
   if (!slips.length) return {};
+  // In Odoo 19 appears_on_payslip is a selection: "always" / "non_zero" / "never".
   const lines = await call<any[]>("hr.payslip.line", "search_read", {
-    domain: [["slip_id", "in", slips.map((x) => x.id)], ["appears_on_payslip", "=", true]],
-    fields: ["slip_id", "name", "code", "total", "category_id"],
+    domain: [["slip_id", "in", slips.map((x) => x.id)], ["appears_on_payslip", "!=", "never"]],
+    fields: ["slip_id", "name", "code", "total"],
   });
-  const out: Record<string, { earn: [string, number][]; ded: [string, number][] }> = {};
+  const round = (n: number) => Math.round(n * 100) / 100;
+  const out: Record<string, { earn: [string, number][]; ded: [string, number][]; net?: number }> = {};
   for (const slip of slips) {
     const period = String(slip.date_from).slice(0, 7);
-    const mine = lines.filter((l) => m2oId(l.slip_id) === slip.id && l.total !== 0 && !["GROSS", "NET"].includes(l.code));
-    out[period] = {
-      earn: mine.filter((l) => l.total > 0).map((l) => [l.name, l.total]),
-      ded: mine.filter((l) => l.total < 0).map((l) => [l.name, -l.total]),
-    };
+    const all = lines.filter((l) => m2oId(l.slip_id) === slip.id);
+    const shown = all.filter((l) => l.total !== 0 && !["GROSS", "NET"].includes(l.code));
+    const earn: [string, number][] = shown.filter((l) => l.total > 0).map((l) => [l.name, round(l.total)]);
+    const ded: [string, number][] = shown.filter((l) => l.total < 0).map((l) => [l.name, round(-l.total)]);
+    // Take-home pay is Odoo's NET line. Deductions that aren't separate lines (such as the
+    // employee's CPF contribution) are shown as one line so the payslip adds up to it.
+    const netLine = all.find((l) => l.code === "NET");
+    if (netLine) {
+      const sum = (xs: [string, number][]) => xs.reduce((s, x) => s + x[1], 0);
+      const gap = round(sum(earn) - sum(ded) - netLine.total);
+      if (gap > 0.005) ded.push(["Other deductions (incl. CPF)", gap]);
+    }
+    out[period] = { earn, ded, net: netLine ? round(netLine.total) : undefined };
   }
   return out;
 }
